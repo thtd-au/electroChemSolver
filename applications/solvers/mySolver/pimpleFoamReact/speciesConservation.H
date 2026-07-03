@@ -156,6 +156,16 @@ if (speciesConservationActive)
         const scalar rxnGenRate = rhoByMi*gSum(RY[i].primitiveField()*mesh.V());
         genRate += rxnGenRate;
 
+        // Add pseudo source from water equilibrium
+        scalar waterEqGenRate = 0.0;
+
+        if (runWaterEquilibrium)
+        {
+            waterEqGenRate = rhoByMi*gSum(RYWaterEq[i].primitiveField()*mesh.V());
+
+            genRate += waterEqGenRate;
+        }
+
         speciesConservationAdvIn[i] += advInRate*dt;
         speciesConservationAdvOut[i] += advOutRate*dt;
         speciesConservationDiffIn[i] += diffInRate*dt;
@@ -165,6 +175,7 @@ if (speciesConservationActive)
         speciesConservationFlowOut[i] += flowOutRate*dt;
 
         speciesConservationGen[i] += genRate*dt;
+        speciesConservationWaterEqGen[i] += waterEqGenRate*dt;
 
         const scalar Nt = rhoByMi*gSum(Yi.primitiveField()*mesh.V());
         const scalar dN = Nt - speciesConservationN0[i];
@@ -197,6 +208,8 @@ if (speciesConservationActive)
                     << "      flowIn=" << flowInRate
                     << " flowOut=" << flowOutRate
                     << " gen=" << genRate << nl
+                    << " waterEqGenRate=" << waterEqGenRate << nl
+
                     << "      advIn=" << advInRate
                     << " advOut=" << advOutRate
                     << " diffIn=" << diffInRate
@@ -222,6 +235,7 @@ if (speciesConservationActive)
                     << " flowIn=" << speciesConservationFlowIn[i]
                     << " flowOut=" << speciesConservationFlowOut[i]
                     << " gen=" << speciesConservationGen[i]
+                    << " waterEqGen=" << speciesConservationWaterEqGen[i]
                     << " R=" << residual
                     << " relR=" << relativeResidual << nl;
             }
@@ -282,6 +296,7 @@ if (speciesConservationActive)
                     << speciesConservationDiffIn[i] << ' '
                     << speciesConservationDiffOut[i] << ' '
                     << speciesConservationGen[i] << ' '
+                    << speciesConservationWaterEqGen[i] << ' '
                     << residual << ' ' << relativeResidual << nl;
             }
             else
@@ -291,6 +306,7 @@ if (speciesConservationActive)
                     << speciesConservationFlowIn[i] << ' '
                     << speciesConservationFlowOut[i] << ' '
                     << speciesConservationGen[i] << ' '
+                    << speciesConservationWaterEqGen[i] << ' '
                     << residual << ' ' << relativeResidual << nl;
             }
         }

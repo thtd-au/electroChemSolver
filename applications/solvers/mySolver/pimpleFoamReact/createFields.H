@@ -135,6 +135,7 @@ word inertSpecie(reactions.lookup("inertSpecie"));
 
 PtrList<volScalarField> Y(species.size());
 PtrList<volScalarField> RY(species.size());
+PtrList<volScalarField> RYWaterEq(Y.size());
 
 forAll(species, i)
 {
@@ -171,6 +172,24 @@ forAll(species, i)
                 writeSources
                 ? IOobject::AUTO_WRITE
                 : IOobject::NO_WRITE
+            ),
+            mesh,
+            dimensionedScalar("zero", dimless/dimTime, 0.0)
+        )
+    );
+
+    RYWaterEq.set // Pseudo source from water equilibrium used for species conservation
+    (
+        i,
+        new volScalarField
+        (
+            IOobject
+            (
+                "RYWaterEq_" + species[i],
+                runTime.timeName(),
+                mesh,
+                IOobject::NO_READ,
+                IOobject::NO_WRITE
             ),
             mesh,
             dimensionedScalar("zero", dimless/dimTime, 0.0)
@@ -226,6 +245,124 @@ if (runConcentration)
         );
     }
 }
+
+//
+// ############################################ water equilibrium ############################################
+//
+
+const bool runWaterEquilibrium = 
+    reactions.found("reactions")
+ && reactions.subDict("reactions").found("waterEquilibrium");
+
+label HplusIndex(-1);
+label OHminusIndex(-1);
+
+dimensionedScalar Kw
+(
+    "Kw",
+    sqr(dimMoles/dimVolume),
+    0.0
+);
+
+if (runWaterEquilibrium)
+{
+    const dictionary& waterDict =
+        reactions.subDict("reactions").subDict("waterEquilibrium");
+
+    word HplusName
+    (
+        waterDict.lookup("Hplus")
+    );
+
+    word OHminusName
+    (
+        waterDict.lookup("OHminus")
+    );
+
+    HplusIndex = species.find(HplusName);
+    OHminusIndex = species.find(OHminusName);
+
+    if (HplusIndex < 0)
+    {
+        FatalIOErrorInFunction(waterDict)
+            << "Unknown Hplus species "
+            << HplusName
+            << exit(FatalIOError);
+    }
+
+    if (OHminusIndex < 0)
+    {
+        FatalIOErrorInFunction(waterDict)
+            << "Unknown OHminus species "
+            << OHminusName
+            << exit(FatalIOError);
+    }
+
+    Kw =
+        dimensionedScalar
+        (
+            "Kw",
+            sqr(dimMoles/dimVolume),
+            waterDict.get<scalar>("Kw")
+        );
+
+    Info<< "Water equilibrium enabled" << nl
+        << "    Hplus   : " << HplusName << nl
+        << "    OHminus : " << OHminusName << nl
+        << "    Kw      : " << Kw.value()
+        << " (mol/m3)^2" << endl;
+}
+else
+{
+    Info<< "Water equilibrium disabled" << endl;
+}
+
+Switch runPH(false);
+Switch writePHField(false);
+
+if (runPH && !runConcentration)
+{
+    FatalIOErrorInFunction(controlDict)
+        << "pH/runPH is true, but concentration/runConcentration is false."
+        << exit(FatalIOError);
+}
+
+if (controlDict.found("pH"))
+{
+    const dictionary& pHDict =
+        controlDict.subDict("pH");
+
+    runPH =
+        pHDict.getOrDefault<Switch>
+        (
+            "runPH",
+            false
+        );
+
+    writePHField =
+        pHDict.getOrDefault<Switch>
+        (
+            "writePHField",
+            false
+        );
+}
+
+volScalarField pH
+(
+    IOobject
+    (
+        "pH",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        writePHField
+      ? IOobject::AUTO_WRITE
+      : IOobject::NO_WRITE
+    ),
+    mesh,
+    dimensionedScalar("pH", dimless, 7.0)
+);
+
 //
 // ############################################ saturation diagnostics  ############################################
 //

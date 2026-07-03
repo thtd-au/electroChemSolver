@@ -190,6 +190,11 @@ int main(int argc, char *argv[])
         if (runConcentration)
         {
             #include "cFields.H"
+            
+            if (runPH)
+            {
+                #include "pHEqn.H"
+            }
         }
         
         // track species saturation 

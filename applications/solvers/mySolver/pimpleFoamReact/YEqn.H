@@ -35,6 +35,7 @@ const dictionary& diffusivityDict = reactions.subDict("diffusivity");
 forAll(Y, i)
 {
     RY[i] = dimensionedScalar("zero", dimless/dimTime, 0.0);
+    RYWaterEq[i] = dimensionedScalar("zero", dimless/dimTime, 0.0); 
 }
 
 // Fill RY from constant/reactions
@@ -72,7 +73,20 @@ forAll(Y, i)
         // Yi.min(1.0); // can hide conservation errors and is therefore not active 
         Yi.correctBoundaryConditions();
 
-        Yt += Yi;
+        // Yt += Yi;
+    }
+}
+
+// Fast water dissociation equilibrium is an algebraic correction applied
+// after transport and before the inert-species closure.
+#include "waterEquilibrium.H"
+
+// Accumulate non-inert species after all algebraic corrections.
+forAll(Y, i)
+{
+    if (i != inertIndex)
+    {
+        Yt += Y[i];
     }
 }
 

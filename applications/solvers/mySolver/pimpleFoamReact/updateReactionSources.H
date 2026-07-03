@@ -95,6 +95,12 @@ if (reactions.found("reactions"))
                 RY[i] += (Mi/rho)*nu*rate;
             }
         }
+        else if (type == "waterEquilibrium")
+        {
+            // Water equilibrium is an algebraic correction applied after
+            // species transport in waterEquilibrium.H.
+            // No volumetric source term is assembled here.
+        }
         else
         {
             FatalIOErrorInFunction(rd)

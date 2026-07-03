@@ -1,4 +1,6 @@
 SOURCE = \
 derivedFvPatchFields/faradaicMassFractionFlux/faradaicMassFractionFluxFvPatchScalarField.C \
+derivedFvPatchFields/pHMassFractionFlux/pHMassFractionFvPatchScalarField.C \
+derivedFvPatchFields/pHMassFractionFlux/inertMassFractionFvPatchScalarField.C \
 
 # sources

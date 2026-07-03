@@ -112,6 +112,7 @@ List<scalar> speciesConservationDiffOut(Y.size(), 0.0);
 List<scalar> speciesConservationFlowIn(Y.size(), 0.0);
 List<scalar> speciesConservationFlowOut(Y.size(), 0.0);
 List<scalar> speciesConservationGen(Y.size(), 0.0);
+List<scalar> speciesConservationWaterEqGen(Y.size(), 0.0);
 
 autoPtr<OFstream> speciesConservationFilePtr;
 
@@ -155,12 +156,12 @@ if (speciesConservationActive)
         if (speciesConservationMode == "full")
         {
             os  << "# time species N0 Nt dN "
-                << "flowIn flowOut advIn advOut diffIn diffOut gen "
+                << "flowIn flowOut advIn advOut diffIn diffOut gen waterEqGen"
                 << "residual relativeResidual" << nl;
         }
         else
         {
-            os  << "# time species dN flowIn flowOut gen "
+            os  << "# time species dN flowIn flowOut gen waterEqGen"
                 << "residual relativeResidual" << nl;
         }
     }

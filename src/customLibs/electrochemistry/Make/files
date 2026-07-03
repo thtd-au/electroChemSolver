@@ -1,4 +1,6 @@
 derivedFvPatchFields/faradaicMassFractionFlux/faradaicMassFractionFluxFvPatchScalarField.C
+derivedFvPatchFields/pHMassFractionFlux/pHMassFractionFvPatchScalarField.C
+derivedFvPatchFields/pHMassFractionFlux/inertMassFractionFvPatchScalarField.C
 
 LIB = $(FOAM_USER_LIBBIN)/libfaradaicBCs
 
