@@ -25,5 +25,5 @@ EXE_LIBS = \
     -lregionFaModels \
     -lfiniteArea \
     -L$(FOAM_USER_LIBBIN) \
-    -lfaradaicBCs
+    -lCustomBCs
     
