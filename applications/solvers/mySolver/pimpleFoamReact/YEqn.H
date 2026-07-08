@@ -31,6 +31,29 @@ label inertIndex = species.find(inertSpecie);
 
 const dictionary& diffusivityDict = reactions.subDict("diffusivity");
 
+const bool hasChargeNumber = reactions.found("chargeNumber");
+
+dimensionedScalar T
+(
+    "T",
+    dimensionSet(0, 0, 0, 1, 0, 0, 0),
+    reactions.getOrDefault<scalar>("temperature", 298.15)
+);
+
+dimensionedScalar Rgas
+(
+    "R",
+    dimensionSet(1, 2, -2, -1, -1, 0, 0),
+    8.31446261815324
+);
+
+dimensionedScalar Fdim
+(
+    "FaradayConstant",
+    dimensionSet(0, 0, 1, 0, -1, 1, 0),    
+    reactions.getOrDefault<scalar>("FaradayConstant", 96485.3329)
+);
+
 // Reset reaction source fields
 forAll(Y, i)
 {
@@ -54,13 +77,159 @@ forAll(Y, i)
             diffusivityDict.get<scalar>(species[i])
         );
 
+        scalar zi = 0.0;
+
+        if (hasChargeNumber)
+        {
+            const dictionary& zDict = reactions.subDict("chargeNumber");
+            zi = zDict.getOrDefault<scalar>(species[i], 0.0);
+        }
+
+        surfaceScalarField migrationFlux
+        (
+            IOobject
+            (
+                "migrationFlux_" + species[i],
+                runTime.timeName(),
+                mesh,
+                IOobject::NO_READ,
+                IOobject::NO_WRITE
+            ),
+            fvc::interpolate(Di*zi*Fdim/(Rgas*T)*Yi)
+        *fvc::snGrad(phiE)
+        *mesh.magSf()
+        );
+
+        // Transport diagnostics 
+        const bool doTransportDiagnostics =
+        (
+            transportDiagnosticsTotal
+        && transportDiagnosticsSpecies.size()
+        && transportDiagnosticsSpecies.find(species[i]) >= 0
+        );
+
+        if (doTransportDiagnostics)
+        {
+            volScalarField advTerm
+            (
+                IOobject
+                (
+                    "adv_" + Yi.name(),
+                    runTime.timeName(),
+                    mesh,
+                    IOobject::NO_READ,
+                    transportDiagnosticsWriteFields 
+                    ? IOobject::NO_WRITE 
+                    : IOobject::NO_WRITE
+                ),
+                -fvc::div(phi, Yi)
+            );
+
+            volScalarField diffTerm
+            (
+                IOobject
+                (
+                    "diff_" + Yi.name(), 
+                    runTime.timeName(), 
+                    mesh,
+                    IOobject::NO_READ,
+                    transportDiagnosticsWriteFields 
+                    ? IOobject::NO_WRITE 
+                    : IOobject::NO_WRITE
+                ),
+                fvc::laplacian(Di, Yi)
+            );
+
+            volScalarField migTerm
+            (
+                IOobject
+                (
+                    "mig_" + Yi.name(), 
+                    runTime.timeName(), 
+                    mesh,
+                    IOobject::NO_READ,
+                    transportDiagnosticsWriteFields 
+                    ? IOobject::NO_WRITE 
+                    : IOobject::NO_WRITE
+                ),
+                fvc::div(migrationFlux)
+            );
+
+            volScalarField rxnTerm
+            (
+                IOobject
+                (
+                    "rxn_" + Yi.name(), 
+                    runTime.timeName(), 
+                    mesh,
+                    IOobject::NO_READ,
+                    transportDiagnosticsWriteFields 
+                    ? IOobject::NO_WRITE 
+                    : IOobject::NO_WRITE
+                ),
+                RY[i]
+            );
+
+            if (transportDiagnosticsWriteFields)
+            {
+                advYDiag[i] = advTerm;
+                diffYDiag[i] = diffTerm;
+                migYDiag[i] = migTerm;
+                rxnYDiag[i] = rxnTerm;
+
+                advYDiag[i].correctBoundaryConditions();
+                diffYDiag[i].correctBoundaryConditions();
+                migYDiag[i].correctBoundaryConditions();
+                rxnYDiag[i].correctBoundaryConditions();
+            }
+
+            const scalar advMax = max(mag(advTerm)).value();
+            const scalar diffMax = max(mag(diffTerm)).value();
+            const scalar migMax = max(mag(migTerm)).value();
+            const scalar rxnMax = max(mag(rxnTerm)).value();
+
+            const scalar advInt = gSum(mag(advTerm.primitiveField())*mesh.V());
+            const scalar diffInt = gSum(mag(diffTerm.primitiveField())*mesh.V());
+            const scalar migInt = gSum(mag(migTerm.primitiveField())*mesh.V());
+            const scalar rxnInt = gSum(mag(rxnTerm.primitiveField())*mesh.V());
+
+            Info<< "Transport diagnostics for " << species[i] << nl
+                << "  max|adv diff mig rxn| [1/s] = "
+                << advMax << " "
+                << diffMax << " "
+                << migMax << " "
+                << rxnMax << nl
+                << "  int|adv diff mig rxn| [m3/s] = "
+                << advInt << " "
+                << diffInt << " "
+                << migInt << " "
+                << rxnInt << nl;
+
+            if (transportDiagnosticsFilePtr.valid() && Pstream::master())
+            {
+                OFstream& os = transportDiagnosticsFilePtr();
+
+                os  << runTime.value() << ' '
+                    << species[i] << ' '
+                    << advMax << ' '
+                    << diffMax << ' '
+                    << migMax << ' '
+                    << rxnMax << ' '
+                    << advInt << ' '
+                    << diffInt << ' '
+                    << migInt << ' '
+                    << rxnInt << nl;
+            }
+        }
+
         fvScalarMatrix YiEqn
         (
             fvm::ddt(Yi)
           + fvm::div(phi, Yi)
-          - fvm::laplacian(Di, Yi)
          ==
-            RY[i]
+            fvm::laplacian(Di, Yi)
+          + fvc::div(migrationFlux)
+          + RY[i]
           + fvOptions(Yi)
         );
 

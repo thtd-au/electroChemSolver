@@ -312,9 +312,9 @@ if (speciesConservationActive)
         }
     }
 
-    if (speciesConservationLogToInfo)
-    {
-        Info<< endl;
-    }
+    // if (speciesConservationLogToInfo)
+    // {
+    //     Info<< endl;
+    // }
 }
 

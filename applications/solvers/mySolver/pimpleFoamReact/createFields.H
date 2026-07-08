@@ -247,6 +247,46 @@ if (runConcentration)
 }
 
 //
+// ############################################ constant gradient potential ############################################
+//
+
+dimensionSet dimVoltage(1, 2, -3, 0, 0, -1, 0);
+
+dimensionedScalar phiERef
+(
+    "phiERef",
+    dimVoltage,
+    reactions.getOrDefault<scalar>("phiERef", 0.0)
+);
+
+dimensionedVector gradPhiE
+(
+    "gradPhiE",
+    dimVoltage/dimLength,
+    reactions.lookupOrDefault<vector>("gradPhiE", vector::zero)
+);
+
+dimensionedVector phiEOrigin
+(
+    "phiEOrigin",
+    dimLength,
+    reactions.lookupOrDefault<vector>("phiEOrigin", vector::zero)
+);
+
+volScalarField phiE
+(
+    IOobject
+    (
+        "phiE",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        IOobject::AUTO_WRITE
+    ),
+    phiERef + ((mesh.C() - phiEOrigin) & gradPhiE)
+);
+
+//
 // ############################################ water equilibrium ############################################
 //
 
@@ -362,6 +402,162 @@ volScalarField pH
     mesh,
     dimensionedScalar("pH", dimless, 7.0)
 );
+
+//
+// ############################################ transport diagnostics  ############################################
+//
+
+word transportDiagnosticsMode("none");
+wordList transportDiagnosticsSpecies(0);
+
+if (controlDict.found("transportDiagnostics"))
+{
+    const dictionary& tdDict = controlDict.subDict("transportDiagnostics");
+
+    transportDiagnosticsMode =
+        tdDict.getOrDefault<word>("mode", word("none"));
+
+    if (tdDict.found("species"))
+    {
+        transportDiagnosticsSpecies = wordList(tdDict.lookup("species"));
+    }
+}
+
+if
+(
+    transportDiagnosticsMode != "none"
+ && transportDiagnosticsMode != "total"
+ && transportDiagnosticsMode != "full"
+)
+{
+    FatalIOErrorInFunction(controlDict)
+        << "transportDiagnostics/mode must be one of: none, total, full"
+        << exit(FatalIOError);
+}
+
+const bool transportDiagnosticsTotal =
+    transportDiagnosticsMode == "total"
+ || transportDiagnosticsMode == "full";
+
+const bool transportDiagnosticsWriteFields =
+    transportDiagnosticsMode == "full";
+// Used later in YEqn.H. Suppress unused warnings from postProcess include path.
+(void)transportDiagnosticsTotal;
+(void)transportDiagnosticsWriteFields;
+
+autoPtr<OFstream> transportDiagnosticsFilePtr;
+
+if
+(
+    transportDiagnosticsTotal
+ && Pstream::master()
+)
+{
+    fileName tdDir(runTime.globalPath()/"postProcessing"/"transportDiagnostics");
+    mkDir(tdDir);
+
+    transportDiagnosticsFilePtr.reset
+    (
+        new OFstream(tdDir/"transportDiagnostics.dat")
+    );
+
+    OFstream& os = transportDiagnosticsFilePtr();
+
+    os  << "# time species "
+        << "advMax diffMax migMax rxnMax "
+        << "advInt diffInt migInt rxnInt"
+        << nl;
+}
+
+PtrList<volScalarField> advYDiag(Y.size());
+PtrList<volScalarField> diffYDiag(Y.size());
+PtrList<volScalarField> migYDiag(Y.size());
+PtrList<volScalarField> rxnYDiag(Y.size());
+
+if (transportDiagnosticsWriteFields)
+{
+    forAll(Y, i)
+    {
+        if
+        (
+            transportDiagnosticsSpecies.size()
+         && transportDiagnosticsSpecies.find(species[i]) >= 0
+        )
+        {
+            advYDiag.set
+            (
+                i,
+                new volScalarField
+                (
+                    IOobject
+                    (
+                        "adv_" + Y[i].name(),
+                        runTime.timeName(),
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::AUTO_WRITE
+                    ),
+                    mesh,
+                    dimensionedScalar("zero", dimless/dimTime, 0.0)
+                )
+            );
+
+            diffYDiag.set
+            (
+                i,
+                new volScalarField
+                (
+                    IOobject
+                    (
+                        "diff_" + Y[i].name(),
+                        runTime.timeName(),
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::AUTO_WRITE
+                    ),
+                    mesh,
+                    dimensionedScalar("zero", dimless/dimTime, 0.0)
+                )
+            );
+
+            migYDiag.set
+            (
+                i,
+                new volScalarField
+                (
+                    IOobject
+                    (
+                        "mig_" + Y[i].name(),
+                        runTime.timeName(),
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::AUTO_WRITE
+                    ),
+                    mesh,
+                    dimensionedScalar("zero", dimless/dimTime, 0.0)
+                )
+            );
+
+            rxnYDiag.set
+            (
+                i,
+                new volScalarField
+                (
+                    IOobject
+                    (
+                        "rxn_" + Y[i].name(),
+                        runTime.timeName(),
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::AUTO_WRITE
+                    ),
+                    mesh,
+                    dimensionedScalar("zero", dimless/dimTime, 0.0)
+                )
+            );
+        }
+    }
+}
 
 //
 // ############################################ saturation diagnostics  ############################################

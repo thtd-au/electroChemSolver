@@ -104,6 +104,7 @@ int main(int argc, char *argv[])
     #include "createDyMControls.H"
     #include "createFields.H"
     #include "createSpeciesConservation.H"
+    #include "createChargeDiagnostics.H"
     #include "createUfIfPresent.H"
     #include "CourantNo.H"
     #include "setInitialDeltaT.H"
@@ -207,6 +208,10 @@ int main(int argc, char *argv[])
         if (speciesConservationActive)
         {
             #include "speciesConservation.H"
+        }
+        if (chargeDiagnosticsActive)
+        {
+            #include "chargeDiagnostics.H"
         }
 
         runTime.write();
