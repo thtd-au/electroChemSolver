@@ -1,6 +1,5 @@
 SOURCE = \
-derivedFvPatchFields/faradaicMassFractionFlux/faradaicMassFractionFluxFvPatchScalarField.C \
-derivedFvPatchFields/pHMassFractionFlux/pHMassFractionFvPatchScalarField.C \
-derivedFvPatchFields/pHMassFractionFlux/inertMassFractionFvPatchScalarField.C \
+derivedFvPatchFields/MolarFlux/faradaicMolarFlux.C \
+derivedFvPatchFields/MolarFlux/pHConcentration.C \
 
 # sources

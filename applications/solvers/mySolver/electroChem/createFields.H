@@ -133,14 +133,50 @@ if (controlDict.found("species"))
 wordList species(reactions.lookup("species"));
 word inertSpecie(reactions.lookup("inertSpecie"));
 
+const dictionary& molarMassDict = reactions.subDict("molarMass");
+
+const dimensionedScalar rho
+(
+    "rho",
+    dimDensity,
+    laminarTransport
+);
+
+PtrList<volScalarField> c(species.size());
 PtrList<volScalarField> Y(species.size());
-PtrList<volScalarField> RY(species.size());
-PtrList<volScalarField> RYWaterEq(Y.size());
+PtrList<volScalarField> Rc(species.size());
 
 forAll(species, i)
 {
-    Info<< "Reading species field Y_" << species[i] << endl;
-    
+
+    const word& specieName = species[i];
+
+    dimensionedScalar Mi
+    (
+        "M_" + specieName,
+        dimMass/dimMoles,
+        molarMassDict.get<scalar>(specieName)
+    );
+
+    Info<< "Reading species field c_" << species[i] << endl;
+
+    c.set
+    (
+        i,
+        new volScalarField
+        (
+            IOobject
+            (
+                "c_" + species[i],
+                runTime.timeName(),
+                mesh,
+                IOobject::MUST_READ,
+                IOobject::AUTO_WRITE
+            ),
+            mesh
+        )
+    );
+
     Y.set
     (
         i,
@@ -151,100 +187,83 @@ forAll(species, i)
                 "Y_" + species[i],
                 runTime.timeName(),
                 mesh,
-                IOobject::MUST_READ,
+                IOobject::NO_READ,
                 IOobject::AUTO_WRITE
             ),
-            mesh
+            c[i]*Mi/rho
         )
     );
 
-    RY.set
+    Rc.set
     (
         i,
         new volScalarField
         (
             IOobject
             (
-                "RY_" + species[i],
+                "Rc_" + specieName,
                 runTime.timeName(),
                 mesh,
                 IOobject::NO_READ,
-                writeSources
-                ? IOobject::AUTO_WRITE
+                writeSources 
+                ? IOobject::AUTO_WRITE 
                 : IOobject::NO_WRITE
             ),
             mesh,
-            dimensionedScalar("zero", dimless/dimTime, 0.0)
+            dimensionedScalar("zero", dimMoles/dimVolume/dimTime, 0.0)
         )
     );
 
-    RYWaterEq.set // Pseudo source from water equilibrium used for species conservation
-    (
-        i,
-        new volScalarField
-        (
-            IOobject
-            (
-                "RYWaterEq_" + species[i],
-                runTime.timeName(),
-                mesh,
-                IOobject::NO_READ,
-                IOobject::NO_WRITE
-            ),
-            mesh,
-            dimensionedScalar("zero", dimless/dimTime, 0.0)
-        )
-    );
 }
 
 //
 // ############################################ convert to concentration ############################################
 //
 
-const dictionary& molarMassDict = reactions.subDict("molarMass");
+// const dictionary& molarMassDict = reactions.subDict("molarMass");
 
-const dimensionedScalar rho
-(
-    "rho",
-    dimDensity,
-    laminarTransport
-);
+// const dimensionedScalar rho
+// (
+//     "rho",
+//     dimDensity,
+//     laminarTransport
+// );
 
-PtrList<volScalarField> c(Y.size());
+// PtrList<volScalarField> c(Y.size());
 
-if (runConcentration)
-{
-    forAll(Y, i)
-    {
-        const volScalarField& Yi = Y[i];
+// if (runConcentration)
+// {
+//     forAll(Y, i)
+//     {
+//         const volScalarField& Yi = Y[i];
 
-        dimensionedScalar Mi
-        (
-            "M_" + species[i],
-            dimMass/dimMoles,
-            molarMassDict.get<scalar>(species[i])
-        );
+//         dimensionedScalar Mi
+//         (
+//             "M_" + species[i],
+//             dimMass/dimMoles,
+//             molarMassDict.get<scalar>(species[i])
+//         );
 
-        c.set
-        (
-            i,
-            new volScalarField
-            (
-                IOobject
-                (
-                    "c_" + species[i],
-                    runTime.timeName(),
-                    mesh,
-                    IOobject::NO_READ,
-                    writeCFields
-                      ? IOobject::AUTO_WRITE
-                      : IOobject::NO_WRITE
-                ),
-                rho*Yi/Mi
-            )
-        );
-    }
-}
+//         c.set
+//         (
+//             i,
+//             new volScalarField
+//             (
+//                 IOobject
+//                 (
+//                     "c_" + species[i],
+//                     runTime.timeName(),
+//                     mesh,
+//                     IOobject::NO_READ,
+//                     writeCFields
+//                       ? IOobject::AUTO_WRITE
+//                       : IOobject::NO_WRITE
+//                 ),
+//                 rho*Yi/Mi
+//             )
+//         );
+//     }
+// }
 
 //
 // ############################################ constant gradient potential ############################################
@@ -316,118 +335,118 @@ surfaceScalarField snGradPhiE
 // ############################################ water equilibrium ############################################
 //
 
-const bool runWaterEquilibrium = 
-    reactions.found("reactions")
- && reactions.subDict("reactions").found("waterEquilibrium");
+// const bool runWaterEquilibrium = 
+//     reactions.found("reactions")
+//  && reactions.subDict("reactions").found("waterEquilibrium");
 
-label HplusIndex(-1);
-label OHminusIndex(-1);
+// label HplusIndex(-1);
+// label OHminusIndex(-1);
 
-dimensionedScalar Kw
-(
-    "Kw",
-    sqr(dimMoles/dimVolume),
-    0.0
-);
+// dimensionedScalar Kw
+// (
+//     "Kw",
+//     sqr(dimMoles/dimVolume),
+//     0.0
+// );
 
-if (runWaterEquilibrium)
-{
-    const dictionary& waterDict =
-        reactions.subDict("reactions").subDict("waterEquilibrium");
+// if (runWaterEquilibrium)
+// {
+//     const dictionary& waterDict =
+//         reactions.subDict("reactions").subDict("waterEquilibrium");
 
-    word HplusName
-    (
-        waterDict.lookup("Hplus")
-    );
+//     word HplusName
+//     (
+//         waterDict.lookup("Hplus")
+//     );
 
-    word OHminusName
-    (
-        waterDict.lookup("OHminus")
-    );
+//     word OHminusName
+//     (
+//         waterDict.lookup("OHminus")
+//     );
 
-    HplusIndex = species.find(HplusName);
-    OHminusIndex = species.find(OHminusName);
+//     HplusIndex = species.find(HplusName);
+//     OHminusIndex = species.find(OHminusName);
 
-    if (HplusIndex < 0)
-    {
-        FatalIOErrorInFunction(waterDict)
-            << "Unknown Hplus species "
-            << HplusName
-            << exit(FatalIOError);
-    }
+//     if (HplusIndex < 0)
+//     {
+//         FatalIOErrorInFunction(waterDict)
+//             << "Unknown Hplus species "
+//             << HplusName
+//             << exit(FatalIOError);
+//     }
 
-    if (OHminusIndex < 0)
-    {
-        FatalIOErrorInFunction(waterDict)
-            << "Unknown OHminus species "
-            << OHminusName
-            << exit(FatalIOError);
-    }
+//     if (OHminusIndex < 0)
+//     {
+//         FatalIOErrorInFunction(waterDict)
+//             << "Unknown OHminus species "
+//             << OHminusName
+//             << exit(FatalIOError);
+//     }
 
-    Kw =
-        dimensionedScalar
-        (
-            "Kw",
-            sqr(dimMoles/dimVolume),
-            waterDict.get<scalar>("Kw")
-        );
+//     Kw =
+//         dimensionedScalar
+//         (
+//             "Kw",
+//             sqr(dimMoles/dimVolume),
+//             waterDict.get<scalar>("Kw")
+//         );
 
-    Info<< "Water equilibrium enabled" << nl
-        << "    Hplus   : " << HplusName << nl
-        << "    OHminus : " << OHminusName << nl
-        << "    Kw      : " << Kw.value()
-        << " (mol/m3)^2" << endl;
-}
-else
-{
-    Info<< "Water equilibrium disabled" << endl;
-}
+//     Info<< "Water equilibrium enabled" << nl
+//         << "    Hplus   : " << HplusName << nl
+//         << "    OHminus : " << OHminusName << nl
+//         << "    Kw      : " << Kw.value()
+//         << " (mol/m3)^2" << endl;
+// }
+// else
+// {
+//     Info<< "Water equilibrium disabled" << endl;
+// }
 
-Switch runPH(false);
-Switch writePHField(false);
+// Switch runPH(false);
+// Switch writePHField(false);
 
-if (runPH && !runConcentration)
-{
-    FatalIOErrorInFunction(controlDict)
-        << "pH/runPH is true, but concentration/runConcentration is false."
-        << exit(FatalIOError);
-}
+// if (runPH && !runConcentration)
+// {
+//     FatalIOErrorInFunction(controlDict)
+//         << "pH/runPH is true, but concentration/runConcentration is false."
+//         << exit(FatalIOError);
+// }
 
-if (controlDict.found("pH"))
-{
-    const dictionary& pHDict =
-        controlDict.subDict("pH");
+// if (controlDict.found("pH"))
+// {
+//     const dictionary& pHDict =
+//         controlDict.subDict("pH");
 
-    runPH =
-        pHDict.getOrDefault<Switch>
-        (
-            "runPH",
-            false
-        );
+//     runPH =
+//         pHDict.getOrDefault<Switch>
+//         (
+//             "runPH",
+//             false
+//         );
 
-    writePHField =
-        pHDict.getOrDefault<Switch>
-        (
-            "writePHField",
-            false
-        );
-}
+//     writePHField =
+//         pHDict.getOrDefault<Switch>
+//         (
+//             "writePHField",
+//             false
+//         );
+// }
 
-volScalarField pH
-(
-    IOobject
-    (
-        "pH",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writePHField
-      ? IOobject::AUTO_WRITE
-      : IOobject::NO_WRITE
-    ),
-    mesh,
-    dimensionedScalar("pH", dimless, 7.0)
-);
+// volScalarField pH
+// (
+//     IOobject
+//     (
+//         "pH",
+//         runTime.timeName(),
+//         mesh,
+//         IOobject::NO_READ,
+//         writePHField
+//       ? IOobject::AUTO_WRITE
+//       : IOobject::NO_WRITE
+//     ),
+//     mesh,
+//     dimensionedScalar("pH", dimless, 7.0)
+// );
 
 //
 // ############################################ transport diagnostics  ############################################
