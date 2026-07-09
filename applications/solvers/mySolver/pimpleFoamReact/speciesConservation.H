@@ -38,6 +38,8 @@ if (speciesConservationActive)
         scalar diffOutRate = 0.0;
         scalar flowInRate = 0.0;
         scalar flowOutRate = 0.0;
+        scalar migInRate = 0.0;
+        scalar migOutRate = 0.0;
         // Total species generation [mol/s]
         // Includes:
         //   - electrode boundary generation
@@ -51,6 +53,8 @@ if (speciesConservationActive)
         List<scalar> patchFlowIn(mesh.boundary().size(), 0.0);
         List<scalar> patchFlowOut(mesh.boundary().size(), 0.0);
         List<scalar> patchGen(mesh.boundary().size(), 0.0);
+        List<scalar> patchMigIn(mesh.boundary().size(), 0.0);
+        List<scalar> patchMigOut(mesh.boundary().size(), 0.0);
 
         forAll(mesh.boundary(), patchi)
         {
@@ -79,6 +83,25 @@ if (speciesConservationActive)
             tmp<scalarField> tsnGradYp = Yp.snGrad();
             const scalarField& snGradYp = tsnGradYp();
 
+            dimensionSet dimVoltage(1, 2, -3, 0, 0, -1, 0);
+
+            dimensionedVector gradPhiE
+            (
+                "gradPhiE",
+                dimVoltage/dimLength,
+                reactions.lookupOrDefault<vector>("gradPhiE", vector::zero)
+            );
+
+            tmp<vectorField> tnf = mesh.boundary()[patchi].nf();
+            const vectorField& nf = tnf();
+
+            scalarField snGradPhiEp(Yp.size(), 0.0);
+
+            forAll(snGradPhiEp, facei)
+            {
+                snGradPhiEp[facei] = nf[facei] & gradPhiE.value();
+            }
+
             scalar pAdvIn = 0.0;
             scalar pAdvOut = 0.0;
             scalar pDiffIn = 0.0;
@@ -86,6 +109,8 @@ if (speciesConservationActive)
             scalar pFlowIn = 0.0;
             scalar pFlowOut = 0.0;
             scalar pGen = 0.0;
+            scalar pMigIn = 0.0;
+            scalar pMigOut = 0.0;
 
             forAll(Yp, facei)
             {
@@ -97,9 +122,33 @@ if (speciesConservationActive)
                 // Positive is outward: -D grad(c).n A.
                 const scalar diff = -rhoDiByMi*snGradYp[facei]*magSfp[facei];
 
+                scalar zi = 0.0;
+
+                if (reactions.found("chargeNumber"))
+                {
+                    const dictionary& zDict = reactions.subDict("chargeNumber");
+                    zi = zDict.getOrDefault<scalar>(species[i], 0.0);
+                }
+
+                const scalar Tval =
+                    reactions.getOrDefault<scalar>("temperature", 298.15);
+
+                const scalar Fval =
+                    reactions.getOrDefault<scalar>("FaradayConstant", 96485.3329);
+
+                const scalar Rval = 8.31446261815324;
+                
+                // Physical outward migration flux.
+                // The species equation uses +div(migrationFlux), so conservation uses -migEqn.
+                const scalar mig =
+                    -rhoByMi * Di * zi * Fval / (Rval * Tval)
+                    * Yp[facei]
+                    * snGradPhiEp[facei]
+                    * magSfp[facei];
+
                 // Combined physical boundary transport rate [mol/s].
                 // This is the quantity used in the conservation residual.
-                const scalar flow = adv + diff;
+                const scalar flow = adv + diff + mig;
 
                 // Mechanism split, diagnostics only.
                 pAdvOut += max(adv, 0.0);
@@ -107,6 +156,9 @@ if (speciesConservationActive)
 
                 pDiffOut += max(diff, 0.0);
                 pDiffIn  += max(-diff, 0.0);
+
+                pMigOut += max(mig, 0.0);
+                pMigIn  += max(-mig, 0.0);
 
                 // Net transport split, used for conservation accounting.
                 pFlowOut += max(flow, 0.0);
@@ -116,7 +168,7 @@ if (speciesConservationActive)
                 // rho*D/M*grad(Y).n A = s*j/(nF) A with the implemented BC sign.
                 if (speciesConservationPatchRole[patchi] == 2)
                 {
-                    pGen += rhoDiByMi*snGradYp[facei]*magSfp[facei];
+                    pGen += rhoDiByMi*snGradYp[facei]*magSfp[facei] - mig;
                 }
             }
 
@@ -127,6 +179,8 @@ if (speciesConservationActive)
             patchFlowIn[patchi] = pFlowIn;
             patchFlowOut[patchi] = pFlowOut;
             patchGen[patchi] = pGen;
+            patchMigIn[patchi] = pMigIn;
+            patchMigOut[patchi] = pMigOut;
 
             if (speciesConservationPatchRole[patchi] == 1)
             {
@@ -134,6 +188,8 @@ if (speciesConservationActive)
                 advOutRate += pAdvOut;
                 diffInRate += pDiffIn;
                 diffOutRate += pDiffOut;
+                migInRate += pMigIn;
+                migOutRate += pMigOut;
 
                 flowInRate += pFlowIn;
                 flowOutRate += pFlowOut;
@@ -148,9 +204,12 @@ if (speciesConservationActive)
         reduce(advOutRate, sumOp<scalar>());
         reduce(diffInRate, sumOp<scalar>());
         reduce(diffOutRate, sumOp<scalar>());
+        reduce(migInRate, sumOp<scalar>());
+        reduce(migOutRate, sumOp<scalar>());
         reduce(flowInRate, sumOp<scalar>());
         reduce(flowOutRate, sumOp<scalar>());
         reduce(genRate, sumOp<scalar>());
+        
 
         // Add volumetric reaction source to generation [mol/s]
         const scalar rxnGenRate = rhoByMi*gSum(RY[i].primitiveField()*mesh.V());
@@ -170,12 +229,16 @@ if (speciesConservationActive)
         speciesConservationAdvOut[i] += advOutRate*dt;
         speciesConservationDiffIn[i] += diffInRate*dt;
         speciesConservationDiffOut[i] += diffOutRate*dt;
+        speciesConservationMigIn[i] += migInRate*dt;
+        speciesConservationMigOut[i] += migOutRate*dt;
 
         speciesConservationFlowIn[i] += flowInRate*dt;
         speciesConservationFlowOut[i] += flowOutRate*dt;
 
         speciesConservationGen[i] += genRate*dt;
         speciesConservationWaterEqGen[i] += waterEqGenRate*dt;
+
+
 
         const scalar Nt = rhoByMi*gSum(Yi.primitiveField()*mesh.V());
         const scalar dN = Nt - speciesConservationN0[i];
@@ -207,13 +270,15 @@ if (speciesConservationActive)
                     << "    rates [mol/s]:" << nl
                     << "      flowIn=" << flowInRate
                     << " flowOut=" << flowOutRate
-                    << " gen=" << genRate << nl
+                    << " gen=" << genRate 
                     << " waterEqGenRate=" << waterEqGenRate << nl
 
                     << "      advIn=" << advInRate
                     << " advOut=" << advOutRate
                     << " diffIn=" << diffInRate
-                    << " diffOut=" << diffOutRate << nl
+                    << " diffOut=" << diffOutRate 
+                    << " migIn=" << migInRate
+                    << " migOut=" << migOutRate<< nl
 
                     << "    totals [mol]:" << nl
                     << "      flowIn=" << speciesConservationFlowIn[i]
@@ -222,7 +287,9 @@ if (speciesConservationActive)
                     << "      advIn=" << speciesConservationAdvIn[i]
                     << " advOut=" << speciesConservationAdvOut[i]
                     << " diffIn=" << speciesConservationDiffIn[i]
-                    << " diffOut=" << speciesConservationDiffOut[i] << nl
+                    << " diffOut=" << speciesConservationDiffOut[i]
+                    << " migIn=" << speciesConservationMigIn[i]
+                    << " migOut=" << speciesConservationMigOut[i] << nl
 
                     << "    residual:" << nl
                     << "      R=" << residual
@@ -295,6 +362,8 @@ if (speciesConservationActive)
                     << speciesConservationAdvOut[i] << ' '
                     << speciesConservationDiffIn[i] << ' '
                     << speciesConservationDiffOut[i] << ' '
+                    << speciesConservationMigIn[i] << ' '
+                    << speciesConservationMigOut[i] << ' '
                     << speciesConservationGen[i] << ' '
                     << speciesConservationWaterEqGen[i] << ' '
                     << residual << ' ' << relativeResidual << nl;

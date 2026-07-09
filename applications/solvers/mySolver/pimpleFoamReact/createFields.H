@@ -286,6 +286,32 @@ volScalarField phiE
     phiERef + ((mesh.C() - phiEOrigin) & gradPhiE)
 );
 
+volVectorField gradPhiEField
+(
+    IOobject
+    (
+        "gradPhiEField",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        IOobject::AUTO_WRITE
+    ),
+    mesh,
+    gradPhiE
+);
+
+surfaceScalarField snGradPhiE
+(
+    IOobject
+    (
+        "snGradPhiE",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        IOobject::AUTO_WRITE
+    ),
+    (mesh.Sf()/mesh.magSf()) & gradPhiE
+);
 //
 // ############################################ water equilibrium ############################################
 //

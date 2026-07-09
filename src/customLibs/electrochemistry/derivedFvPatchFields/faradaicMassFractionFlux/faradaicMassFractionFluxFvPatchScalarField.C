@@ -207,9 +207,49 @@ void faradaicMassFractionFluxFvPatchScalarField::updateCoeffs()
             << "rho must be positive" << exit(FatalIOError);
     }
 
-    gradient() =
+    dimensionSet dimVoltage(1, 2, -3, 0, 0, -1, 0);
+
+    dimensionedVector gradPhiE
+    (
+        "gradPhiE",
+        dimVoltage/dimLength,
+        reactions.lookupOrDefault<vector>("gradPhiE", vector::zero)
+    );
+
+    tmp<vectorField> tnf = patch().nf();
+    const vectorField& nf = tnf();
+
+    scalarField snGradPhiE(patch().size(), 0.0);
+
+    forAll(snGradPhiE, facei)
+    {
+        snGradPhiE[facei] = nf[facei] & gradPhiE.value();
+    }
+
+    scalar zi = 0.0;
+    if (reactions.found("chargeNumber"))
+    {
+        const dictionary& zDict = reactions.subDict("chargeNumber");
+        zi = zDict.getOrDefault<scalar>(specieName, 0.0);
+    }
+
+    const scalar T =
+        reactions.getOrDefault<scalar>("temperature", 298.15);
+
+    const scalar R = 8.31446261815324;
+
+    const scalar faradaicGradient =
         stoichCoeff_*Mi*currentDensity_
-       /(rho.value()*nElectrons_*F*Di);
+    /(rho.value()*nElectrons_*F*Di);
+
+    const scalarField YiInternal = patchInternalField();
+
+    const scalarField beta =
+        zi*F/(R*T)*snGradPhiE;
+
+    gradient() =
+        (faradaicGradient - beta*YiInternal)
+    /(scalar(1.0) + beta/patch().deltaCoeffs());
     
     fixedGradientFvPatchScalarField::updateCoeffs();
 }
