@@ -27,8 +27,6 @@ int main(int argc, char *argv[])
     #include "initContinuityErrs.H"
     #include "createDyMControls.H"
     #include "createFields.H"
-    #include "createSpeciesConservation.H"
-    #include "createChargeDiagnostics.H"
     #include "createUfIfPresent.H"
     #include "CourantNo.H"
     #include "setInitialDeltaT.H"
@@ -112,28 +110,9 @@ int main(int argc, char *argv[])
         // electroChem.C time loop
         #include "cEqn.H"
             
-        // if (runPH)
-        // {
-        //     #include "pHEqn.H"
-        // }
-
         #include "YEqn.H"
         
-        // track species saturation 
-        if (runSaturation)
-        {
-            #include "SEqn.H"
-        }
-
-        // // check species conservation 
-        // if (speciesConservationActive)
-        // {
-        //     #include "speciesConservation.H"
-        // }
-        // if (chargeDiagnosticsActive)
-        // {
-        //     #include "chargeDiagnostics.H"
-        // }
+        #include "diagnostics.H"
 
         runTime.write();
 

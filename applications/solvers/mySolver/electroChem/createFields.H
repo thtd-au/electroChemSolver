@@ -45,7 +45,7 @@ autoPtr<incompressible::turbulenceModel> turbulence
 );
 
 //
-// ############################################ create reaction dict ############################################
+// ############################################ read reactions dict ############################################
 //
 
 Info<< "Reading reactions dictionary\n" << endl;
@@ -62,77 +62,6 @@ IOdictionary reactions
     )
 );
 
-const dictionary& controlDict = runTime.controlDict();
-
-Switch writeSources(false);
-
-if (runTime.controlDict().found("reaction"))
-{
-    const dictionary& reactionDict =
-        runTime.controlDict().subDict("reaction");
-
-    writeSources =
-        reactionDict.getOrDefault<Switch>
-        (
-            "writeSources",
-            false
-        );
-}
-
-Switch runConcentration(false);
-Switch writeCFields(false);
-
-if (controlDict.found("concentration"))
-{
-    const dictionary& cDict = controlDict.subDict("concentration");
-
-    runConcentration = cDict.getOrDefault<Switch>("runConcentration", false);
-    writeCFields = cDict.getOrDefault<Switch>("writeCFields", false);
-}
-
-Switch runSaturation(false);
-Switch writeSFields(false);
-Switch writeSTotField(false);
-Switch writePEqFields(false);
-Switch writePEqTotField(false);
-
-if (controlDict.found("saturation"))
-{
-    const dictionary& sDict = controlDict.subDict("saturation");
-
-    runSaturation = sDict.getOrDefault<Switch>("runSaturation", false);
-    writeSFields = sDict.getOrDefault<Switch>("writeSFields", false);
-    writeSTotField = sDict.getOrDefault<Switch>("writeSTotField", false);
-    writePEqFields = sDict.getOrDefault<Switch>("writePEqFields", false);
-    writePEqTotField = sDict.getOrDefault<Switch>("writePEqTotField", false);
-}
-
-if (runSaturation && !runConcentration)
-{
-    FatalIOErrorInFunction(controlDict)
-        << "saturation/runSaturation is true, but "
-        << "concentration/runConcentration is false."
-        << exit(FatalIOError);
-}
-
-Switch printYFields(true);
-Switch printDiagnostics(true);
-
-if (controlDict.found("species"))
-{
-    const dictionary& speciesDict = controlDict.subDict("species");
-
-    printYFields = speciesDict.getOrDefault<Switch>("printYFields", true);
-    printDiagnostics = speciesDict.getOrDefault<Switch>("printDiagnostics", true);
-}
-
-//
-// ############################################ create species mass-fraction field ############################################
-//
-
-wordList species(reactions.lookup("species"));
-word inertSpecie(reactions.lookup("inertSpecie"));
-
 const dictionary& molarMassDict = reactions.subDict("molarMass");
 
 const dimensionedScalar rho
@@ -141,6 +70,306 @@ const dimensionedScalar rho
     dimDensity,
     laminarTransport
 );
+
+//
+// ############################################ read controlDict ############################################
+//
+
+const dictionary& controlDict = runTime.controlDict();
+
+// Species control
+Switch printCFields(false);
+Switch writeSourceFields(false);
+Switch printYFields(false);
+Switch writeYFields(false);
+
+// Diagnostics controls
+Switch diagTransportPrint(false);
+Switch diagTransportLog(false);
+wordList diagTransportSpecies(0);
+
+if (controlDict.found("species"))
+{
+    const dictionary& speciesControlDict =
+        controlDict.subDict("species");
+
+    if (speciesControlDict.found("c"))
+    {
+        const dictionary& cControlDict =
+            speciesControlDict.subDict("c");
+
+        printCFields =
+            cControlDict.getOrDefault<Switch>("print", false);
+
+        writeSourceFields =
+            cControlDict.getOrDefault<Switch>("writeSources", false);
+    }
+
+    if (speciesControlDict.found("Y"))
+    {
+        const dictionary& YControlDict =
+            speciesControlDict.subDict("Y");
+
+        printYFields =
+            YControlDict.getOrDefault<Switch>("print", false);
+
+        writeYFields =
+            YControlDict.getOrDefault<Switch>("write", false);
+    }
+}
+
+Switch diagConservationPrint(false);
+Switch diagConservationLog(false);
+word diagConservationMode("full");
+wordList diagFlowPatches(0);
+wordList diagElectrodePatches(0);
+
+word diagChargeOutput("molarCharge");  // molarCharge | chargeDensity | both
+Switch diagChargePrint(false);
+Switch diagChargeLog(false);
+Switch diagChargeWrite(false);
+
+Switch diagSatPrintSi(false);
+Switch diagSatPrintSTot(false);
+Switch diagSatPrintPEqi(false);
+Switch diagSatPrintPEqTot(false);
+
+Switch diagSatWriteSi(false);
+Switch diagSatWriteSTot(false);
+Switch diagSatWritePEqi(false);
+Switch diagSatWritePEqTot(false);
+
+Switch diagInertClosurePrint(false);
+
+Switch diagDebyePrint(false);
+Switch diagDebyeLog(false);
+label diagDebyeDirection(1);
+scalar diagDebyeMinIonicSum(0.0);
+Switch diagDebyeWriteIonicSum(false);
+Switch diagDebyeWriteLambda(false);
+Switch diagDebyeWriteE(false);
+
+if (controlDict.found("diagnostics"))
+{
+    const dictionary& diagDict = controlDict.subDict("diagnostics");
+
+    if (diagDict.found("transport"))
+    {
+        const dictionary& d = diagDict.subDict("transport");
+
+        diagTransportPrint = d.getOrDefault<Switch>("print", false);
+        diagTransportLog   = d.getOrDefault<Switch>("log", false);
+
+        if (d.found("species"))
+        {
+            diagTransportSpecies = wordList(d.lookup("species"));
+        }
+    }
+
+    if (diagDict.found("conservation"))
+    {
+        const dictionary& d =
+            diagDict.subDict("conservation");
+
+        diagConservationPrint =
+            d.getOrDefault<Switch>("print", false);
+
+        diagConservationLog =
+            d.getOrDefault<Switch>("log", false);
+
+        diagConservationMode =
+            d.getOrDefault<word>("mode", word("full"));
+
+        if
+        (
+            diagConservationMode != "full"
+        && diagConservationMode != "residuals"
+        )
+        {
+            FatalIOErrorInFunction(d)
+                << "diagnostics/conservation/mode must be "
+                << "full or residuals"
+                << exit(FatalIOError);
+        }
+
+        if (d.found("flowPatches"))
+        {
+            diagFlowPatches =
+                wordList(d.lookup("flowPatches"));
+        }
+
+        if (d.found("electrodePatches"))
+        {
+            diagElectrodePatches =
+                wordList(d.lookup("electrodePatches"));
+        }
+    }
+
+    if (diagDict.found("charge"))
+    {
+        const dictionary& d = diagDict.subDict("charge");
+
+        diagChargeOutput = d.getOrDefault<word>("output", word("molarCharge"));
+        diagChargePrint  = d.getOrDefault<Switch>("print", false);
+        diagChargeLog    = d.getOrDefault<Switch>("log", false);
+        diagChargeWrite  = d.getOrDefault<Switch>("write", false);
+
+        if
+        (
+            diagChargeOutput != "molarCharge"
+         && diagChargeOutput != "chargeDensity"
+         && diagChargeOutput != "both"
+        )
+        {
+            FatalIOErrorInFunction(d)
+                << "diagnostics/charge/output must be "
+                << "molarCharge, chargeDensity, or both"
+                << exit(FatalIOError);
+        }
+    }
+
+    if (diagDict.found("saturation"))
+    {
+        const dictionary& d = diagDict.subDict("saturation");
+
+        if (d.found("print"))
+        {
+            const dictionary& p = d.subDict("print");
+
+            diagSatPrintSi     = p.getOrDefault<Switch>("Si", false);
+            diagSatPrintSTot   = p.getOrDefault<Switch>("STot", false);
+            diagSatPrintPEqi   = p.getOrDefault<Switch>("pEqi", false);
+            diagSatPrintPEqTot = p.getOrDefault<Switch>("pEqTot", false);
+        }
+
+        if (d.found("write"))
+        {
+            const dictionary& w = d.subDict("write");
+
+            diagSatWriteSi     = w.getOrDefault<Switch>("Si", false);
+            diagSatWriteSTot   = w.getOrDefault<Switch>("STot", false);
+            diagSatWritePEqi   = w.getOrDefault<Switch>("pEqi", false);
+            diagSatWritePEqTot = w.getOrDefault<Switch>("pEqTot", false);
+        }
+    }
+
+    if (diagDict.found("inertClosure"))
+    {
+        const dictionary& d =
+            diagDict.subDict("inertClosure");
+
+        diagInertClosurePrint =
+            d.getOrDefault<Switch>("print", false);
+    }
+
+    if (diagDict.found("DebyeNumber"))
+    {
+        const dictionary& d =
+            diagDict.subDict("DebyeNumber");
+
+        diagDebyePrint =
+            d.getOrDefault<Switch>("print", false);
+
+        diagDebyeLog =
+            d.getOrDefault<Switch>("log", false);
+
+        diagDebyeDirection =
+            d.getOrDefault<label>("direction", 1);
+
+        if
+        (
+            diagDebyeDirection < 0
+        || diagDebyeDirection > 2
+        )
+        {
+            FatalIOErrorInFunction(d)
+                << "diagnostics/DebyeNumber/direction must be "
+                << "0 for x, 1 for y, or 2 for z"
+                << exit(FatalIOError);
+        }
+
+        if (d.found("write"))
+        {
+            const dictionary& wd =
+                d.subDict("write");
+
+            diagDebyeWriteIonicSum =
+                wd.getOrDefault<Switch>
+                (
+                    "ionicSum",
+                    false
+                );
+
+            diagDebyeWriteLambda =
+                wd.getOrDefault<Switch>
+                (
+                    "lambda_D",
+                    false
+                );
+
+            diagDebyeWriteE =
+                wd.getOrDefault<Switch>
+                (
+                    "E_D",
+                    false
+                );
+        }
+        
+        diagDebyeMinIonicSum =
+            d.getOrDefault<scalar>
+            (
+                "minIonicSum",
+                0.0
+            );
+
+        if (diagDebyeMinIonicSum < 0.0)
+        {
+            FatalIOErrorInFunction(d)
+                << "diagnostics/DebyeNumber/minIonicSum must be non-negative"
+                << exit(FatalIOError);
+        }
+    }
+}
+
+const bool diagTransportActive =
+    diagTransportPrint || diagTransportLog;
+
+const bool diagConservationActive =
+    diagConservationPrint || diagConservationLog;
+
+const bool diagChargeActive =
+    diagChargePrint || diagChargeLog || diagChargeWrite;
+
+const bool diagSaturationActive =
+    diagSatPrintSi
+ || diagSatPrintSTot
+ || diagSatPrintPEqi
+ || diagSatPrintPEqTot
+ || diagSatWriteSi
+ || diagSatWriteSTot
+ || diagSatWritePEqi
+ || diagSatWritePEqTot;
+
+ const bool diagDebyeActive =
+    diagDebyePrint
+ || diagDebyeLog
+ || diagDebyeWriteLambda
+ || diagDebyeWriteE;
+
+(void)diagTransportActive;
+(void)diagConservationActive;
+(void)diagChargeActive;
+(void)diagSaturationActive;
+(void)diagDebyeActive;
+(void)diagDebyeDirection;
+
+
+//
+// ############################################ create species fields ############################################
+//
+
+wordList species(reactions.lookup("species"));
+word inertSpecie(reactions.lookup("inertSpecie"));
 
 PtrList<volScalarField> c(species.size());
 PtrList<volScalarField> Y(species.size());
@@ -188,7 +417,9 @@ forAll(species, i)
                 runTime.timeName(),
                 mesh,
                 IOobject::NO_READ,
-                IOobject::AUTO_WRITE
+                writeYFields
+                ? IOobject::AUTO_WRITE
+                : IOobject::NO_WRITE
             ),
             c[i]*Mi/rho
         )
@@ -205,7 +436,7 @@ forAll(species, i)
                 runTime.timeName(),
                 mesh,
                 IOobject::NO_READ,
-                writeSources 
+                writeSourceFields 
                 ? IOobject::AUTO_WRITE 
                 : IOobject::NO_WRITE
             ),
@@ -215,55 +446,6 @@ forAll(species, i)
     );
 
 }
-
-//
-// ############################################ convert to concentration ############################################
-//
-
-// const dictionary& molarMassDict = reactions.subDict("molarMass");
-
-// const dimensionedScalar rho
-// (
-//     "rho",
-//     dimDensity,
-//     laminarTransport
-// );
-
-// PtrList<volScalarField> c(Y.size());
-
-// if (runConcentration)
-// {
-//     forAll(Y, i)
-//     {
-//         const volScalarField& Yi = Y[i];
-
-//         dimensionedScalar Mi
-//         (
-//             "M_" + species[i],
-//             dimMass/dimMoles,
-//             molarMassDict.get<scalar>(species[i])
-//         );
-
-//         c.set
-//         (
-//             i,
-//             new volScalarField
-//             (
-//                 IOobject
-//                 (
-//                     "c_" + species[i],
-//                     runTime.timeName(),
-//                     mesh,
-//                     IOobject::NO_READ,
-//                     writeCFields
-//                       ? IOobject::AUTO_WRITE
-//                       : IOobject::NO_WRITE
-//                 ),
-//                 rho*Yi/Mi
-//             )
-//         );
-//     }
-// }
 
 //
 // ############################################ constant gradient potential ############################################
@@ -331,289 +513,137 @@ surfaceScalarField snGradPhiE
     ),
     (mesh.Sf()/mesh.magSf()) & gradPhiE
 );
-//
-// ############################################ water equilibrium ############################################
-//
-
-// const bool runWaterEquilibrium = 
-//     reactions.found("reactions")
-//  && reactions.subDict("reactions").found("waterEquilibrium");
-
-// label HplusIndex(-1);
-// label OHminusIndex(-1);
-
-// dimensionedScalar Kw
-// (
-//     "Kw",
-//     sqr(dimMoles/dimVolume),
-//     0.0
-// );
-
-// if (runWaterEquilibrium)
-// {
-//     const dictionary& waterDict =
-//         reactions.subDict("reactions").subDict("waterEquilibrium");
-
-//     word HplusName
-//     (
-//         waterDict.lookup("Hplus")
-//     );
-
-//     word OHminusName
-//     (
-//         waterDict.lookup("OHminus")
-//     );
-
-//     HplusIndex = species.find(HplusName);
-//     OHminusIndex = species.find(OHminusName);
-
-//     if (HplusIndex < 0)
-//     {
-//         FatalIOErrorInFunction(waterDict)
-//             << "Unknown Hplus species "
-//             << HplusName
-//             << exit(FatalIOError);
-//     }
-
-//     if (OHminusIndex < 0)
-//     {
-//         FatalIOErrorInFunction(waterDict)
-//             << "Unknown OHminus species "
-//             << OHminusName
-//             << exit(FatalIOError);
-//     }
-
-//     Kw =
-//         dimensionedScalar
-//         (
-//             "Kw",
-//             sqr(dimMoles/dimVolume),
-//             waterDict.get<scalar>("Kw")
-//         );
-
-//     Info<< "Water equilibrium enabled" << nl
-//         << "    Hplus   : " << HplusName << nl
-//         << "    OHminus : " << OHminusName << nl
-//         << "    Kw      : " << Kw.value()
-//         << " (mol/m3)^2" << endl;
-// }
-// else
-// {
-//     Info<< "Water equilibrium disabled" << endl;
-// }
-
-// Switch runPH(false);
-// Switch writePHField(false);
-
-// if (runPH && !runConcentration)
-// {
-//     FatalIOErrorInFunction(controlDict)
-//         << "pH/runPH is true, but concentration/runConcentration is false."
-//         << exit(FatalIOError);
-// }
-
-// if (controlDict.found("pH"))
-// {
-//     const dictionary& pHDict =
-//         controlDict.subDict("pH");
-
-//     runPH =
-//         pHDict.getOrDefault<Switch>
-//         (
-//             "runPH",
-//             false
-//         );
-
-//     writePHField =
-//         pHDict.getOrDefault<Switch>
-//         (
-//             "writePHField",
-//             false
-//         );
-// }
-
-// volScalarField pH
-// (
-//     IOobject
-//     (
-//         "pH",
-//         runTime.timeName(),
-//         mesh,
-//         IOobject::NO_READ,
-//         writePHField
-//       ? IOobject::AUTO_WRITE
-//       : IOobject::NO_WRITE
-//     ),
-//     mesh,
-//     dimensionedScalar("pH", dimless, 7.0)
-// );
 
 //
-// ############################################ transport diagnostics  ############################################
+// ############################################ diagnostics fields  ############################################
 //
 
-word transportDiagnosticsMode("none");
-wordList transportDiagnosticsSpecies(0);
-
-if (controlDict.found("transportDiagnostics"))
-{
-    const dictionary& tdDict = controlDict.subDict("transportDiagnostics");
-
-    transportDiagnosticsMode =
-        tdDict.getOrDefault<word>("mode", word("none"));
-
-    if (tdDict.found("species"))
-    {
-        transportDiagnosticsSpecies = wordList(tdDict.lookup("species"));
-    }
-}
-
-if
-(
-    transportDiagnosticsMode != "none"
- && transportDiagnosticsMode != "total"
- && transportDiagnosticsMode != "full"
-)
-{
-    FatalIOErrorInFunction(controlDict)
-        << "transportDiagnostics/mode must be one of: none, total, full"
-        << exit(FatalIOError);
-}
-
-const bool transportDiagnosticsTotal =
-    transportDiagnosticsMode == "total"
- || transportDiagnosticsMode == "full";
-
-const bool transportDiagnosticsWriteFields =
-    transportDiagnosticsMode == "full";
-// Used later in YEqn.H. Suppress unused warnings from postProcess include path.
-(void)transportDiagnosticsTotal;
-(void)transportDiagnosticsWriteFields;
-
-autoPtr<OFstream> transportDiagnosticsFilePtr;
-
-if
-(
-    transportDiagnosticsTotal
- && Pstream::master()
-)
-{
-    fileName tdDir(runTime.globalPath()/"postProcessing"/"transportDiagnostics");
-    mkDir(tdDir);
-
-    transportDiagnosticsFilePtr.reset
-    (
-        new OFstream(tdDir/"transportDiagnostics.dat")
+const bool writeMolarCharge =
+    diagChargeWrite
+ && (
+        diagChargeOutput == "molarCharge"
+     || diagChargeOutput == "both"
     );
 
-    OFstream& os = transportDiagnosticsFilePtr();
+const bool writeChargeDensity =
+    diagChargeWrite
+ && (
+        diagChargeOutput == "chargeDensity"
+     || diagChargeOutput == "both"
+    );
 
-    os  << "# time species "
-        << "advMax diffMax migMax rxnMax "
-        << "advInt diffInt migInt rxnInt"
-        << nl;
-}
+dimensionSet dimElectricCharge(0, 0, 1, 0, 0, 1, 0);
 
-PtrList<volScalarField> advYDiag(Y.size());
-PtrList<volScalarField> diffYDiag(Y.size());
-PtrList<volScalarField> migYDiag(Y.size());
-PtrList<volScalarField> rxnYDiag(Y.size());
+volScalarField molarCharge
+(
+    IOobject
+    (
+        "molarCharge",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        writeMolarCharge
+        ? IOobject::AUTO_WRITE
+        : IOobject::NO_WRITE
+    ),
+    mesh,
+    dimensionedScalar("zero", dimMoles/dimVolume, 0.0)
+);
 
-if (transportDiagnosticsWriteFields)
-{
-    forAll(Y, i)
-    {
-        if
-        (
-            transportDiagnosticsSpecies.size()
-         && transportDiagnosticsSpecies.find(species[i]) >= 0
-        )
-        {
-            advYDiag.set
-            (
-                i,
-                new volScalarField
-                (
-                    IOobject
-                    (
-                        "adv_" + Y[i].name(),
-                        runTime.timeName(),
-                        mesh,
-                        IOobject::NO_READ,
-                        IOobject::AUTO_WRITE
-                    ),
-                    mesh,
-                    dimensionedScalar("zero", dimless/dimTime, 0.0)
-                )
-            );
+volScalarField chargeDensity
+(
+    IOobject
+    (
+        "chargeDensity",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        writeChargeDensity
+        ? IOobject::AUTO_WRITE
+        : IOobject::NO_WRITE
+    ),
+    mesh,
+    dimensionedScalar("zero",dimElectricCharge/dimVolume,0.0)
+);
 
-            diffYDiag.set
-            (
-                i,
-                new volScalarField
-                (
-                    IOobject
-                    (
-                        "diff_" + Y[i].name(),
-                        runTime.timeName(),
-                        mesh,
-                        IOobject::NO_READ,
-                        IOobject::AUTO_WRITE
-                    ),
-                    mesh,
-                    dimensionedScalar("zero", dimless/dimTime, 0.0)
-                )
-            );
+volScalarField ionicSumField
+(
+    IOobject
+    (
+        "ionicSum",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        diagDebyeWriteIonicSum
+        ? IOobject::AUTO_WRITE
+        : IOobject::NO_WRITE
+    ),
+    mesh,
+    dimensionedScalar
+    (
+        "zero",
+        dimMoles/dimVolume,
+        0.0
+    )
+);
 
-            migYDiag.set
-            (
-                i,
-                new volScalarField
-                (
-                    IOobject
-                    (
-                        "mig_" + Y[i].name(),
-                        runTime.timeName(),
-                        mesh,
-                        IOobject::NO_READ,
-                        IOobject::AUTO_WRITE
-                    ),
-                    mesh,
-                    dimensionedScalar("zero", dimless/dimTime, 0.0)
-                )
-            );
+volScalarField lambdaD
+(
+    IOobject
+    (
+        "lambda_D",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        diagDebyeWriteLambda
+        ? IOobject::AUTO_WRITE
+        : IOobject::NO_WRITE
+    ),
+    mesh,
+    dimensionedScalar
+    (
+        "lambda_D",
+        dimLength,
+        0.0
+    )
+);
 
-            rxnYDiag.set
-            (
-                i,
-                new volScalarField
-                (
-                    IOobject
-                    (
-                        "rxn_" + Y[i].name(),
-                        runTime.timeName(),
-                        mesh,
-                        IOobject::NO_READ,
-                        IOobject::AUTO_WRITE
-                    ),
-                    mesh,
-                    dimensionedScalar("zero", dimless/dimTime, 0.0)
-                )
-            );
-        }
-    }
-}
+volScalarField DebyeNumber
+(
+    IOobject
+    (
+        "E_D",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        diagDebyeWriteE
+        ? IOobject::AUTO_WRITE
+        : IOobject::NO_WRITE
+    ),
+    mesh,
+    dimensionedScalar
+    (
+        "E_D",
+        dimless,
+        0.0
+    )
+);
 
-//
-// ############################################ saturation diagnostics  ############################################
-//
 
-// Henry-law saturation diagnostics setup
+// Saturation diagnostic fields
+
 dimensionedScalar pAbsRef
 (
     "absolutePressureReference",
     dimPressure,
     reactions.getOrDefault<scalar>("absolutePressureReference", 101325.0)
+);
+
+dimensionedScalar pSmall
+(
+    "pSmall",
+    dimPressure,
+    SMALL
 );
 
 volScalarField pEq_tot
@@ -624,9 +654,7 @@ volScalarField pEq_tot
         runTime.timeName(),
         mesh,
         IOobject::NO_READ,
-        writePEqTotField
-          ? IOobject::AUTO_WRITE
-          : IOobject::NO_WRITE
+        diagSatWritePEqTot ? IOobject::AUTO_WRITE : IOobject::NO_WRITE
     ),
     mesh,
     dimensionedScalar("zero", dimPressure, 0.0)
@@ -640,9 +668,7 @@ volScalarField S_tot
         runTime.timeName(),
         mesh,
         IOobject::NO_READ,
-        writeSTotField
-            ? IOobject::AUTO_WRITE
-            : IOobject::NO_WRITE
+        diagSatWriteSTot ? IOobject::AUTO_WRITE : IOobject::NO_WRITE
     ),
     mesh,
     dimensionedScalar("zero", dimless, 0.0)
@@ -651,19 +677,19 @@ volScalarField S_tot
 wordList henrySpecies(0);
 labelList henrySpeciesIndex(0);
 scalarList henryConstants(0);
-if (runSaturation)
+
+if (diagSaturationActive)
 {
     if (reactions.found("henryConstants") || reactions.found("henryConstant"))
     {
-        const dictionary& henryDict = reactions.found("henryConstants")
-        ? reactions.subDict("henryConstants")
-        : reactions.subDict("henryConstant");
+        const dictionary& henryDict =
+            reactions.found("henryConstants")
+          ? reactions.subDict("henryConstants")
+          : reactions.subDict("henryConstant");
 
         henrySpecies = henryDict.toc();
         henrySpeciesIndex.setSize(henrySpecies.size(), -1);
         henryConstants.setSize(henrySpecies.size(), 0.0);
-
-        Info<< "Creating Henry saturation diagnostics for species:" << nl;
 
         forAll(henrySpecies, hi)
         {
@@ -674,7 +700,7 @@ if (runSaturation)
             {
                 FatalIOErrorInFunction(reactions)
                     << "Species " << specieName
-                    << " is listed in henryConstants but not in species"
+                    << " is listed in henryConstant but not in species"
                     << exit(FatalIOError);
             }
 
@@ -683,49 +709,19 @@ if (runSaturation)
             if (H <= SMALL)
             {
                 FatalIOErrorInFunction(reactions)
-                    << "Henry constant for species " << specieName
-                    << " must be positive"
+                    << "Henry constant for species "
+                    << specieName << " must be positive"
                     << exit(FatalIOError);
             }
 
             henrySpeciesIndex[hi] = speciei;
             henryConstants[hi] = H;
-
-            Info<< "  " << specieName << ": H = " << H
-                << " mol/(m3 Pa)" << nl;
         }
-
-        Info<< "absolutePressureReference = " << pAbsRef.value()
-            << " Pa" << nl << endl;
-    }
-    else
-    {
-        Info<< "Henry saturation diagnostics: none" << nl << endl;
     }
 }
 
 PtrList<volScalarField> pEqHenry(henrySpecies.size());
 PtrList<volScalarField> saturation(henrySpecies.size());
-
-dimensionedScalar pSmall
-(
-    "pSmall",
-    dimPressure,
-    SMALL
-);
-
-volScalarField pAbs
-(
-    IOobject
-    (
-        "pAbs_tmp",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        IOobject::NO_WRITE
-    ),
-    pAbsRef + rho*p
-);
 
 forAll(henrySpecies, hi)
 {
@@ -750,9 +746,9 @@ forAll(henrySpecies, hi)
                 runTime.timeName(),
                 mesh,
                 IOobject::NO_READ,
-                writePEqFields
-                ? IOobject::AUTO_WRITE
-                : IOobject::NO_WRITE
+                diagSatWritePEqi
+              ? IOobject::AUTO_WRITE
+              : IOobject::NO_WRITE
             ),
             c[speciei]/Hi
         )
@@ -769,21 +765,15 @@ forAll(henrySpecies, hi)
                 runTime.timeName(),
                 mesh,
                 IOobject::NO_READ,
-                writeSFields
-                ? IOobject::AUTO_WRITE
-                : IOobject::NO_WRITE
+                diagSatWriteSi
+              ? IOobject::AUTO_WRITE
+              : IOobject::NO_WRITE
             ),
-            pEqHenry[hi]/max(pAbs, pSmall)
+            mesh,
+            dimensionedScalar("zero", dimless, 0.0)
         )
     );
-
-    pEq_tot += pEqHenry[hi];
 }
-S_tot = pEq_tot/max(pAbs, pSmall);
-
-pEq_tot.correctBoundaryConditions();
-S_tot.correctBoundaryConditions();
-
 
 #include "createMRF.H"
 #include "createFvOptions.H"
