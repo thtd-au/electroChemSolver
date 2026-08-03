@@ -242,12 +242,9 @@
 
         forAll(c, i)
         {
-            const scalar cMin = min(c[i]).value();
-            const scalar cMax = max(c[i]).value();
-
-            const scalar cMean =
-                gSum(c[i].primitiveField()*mesh.V())
-            /gSum(mesh.V());
+            const scalar cMin = gMin(c[i].primitiveField());
+            const scalar cMax = gMax(c[i].primitiveField());
+            const scalar cMean = gSum(c[i].primitiveField()*mesh.V())/gSum(mesh.V());
 
             Info<< "  " << c[i].name()
                 << " min/mean/max = "
@@ -267,12 +264,9 @@
 
         forAll(Y, i)
         {
-            const scalar YMin = min(Y[i]).value();
-            const scalar YMax = max(Y[i]).value();
-
-            const scalar YMean =
-                gSum(Y[i].primitiveField()*mesh.V())
-            /gSum(mesh.V());
+            const scalar YMin = gMin(Y[i].primitiveField());
+            const scalar YMax = gMax(Y[i].primitiveField());
+            const scalar YMean = gSum(Y[i].primitiveField()*mesh.V())/gSum(mesh.V());
 
             Info<< "  " << Y[i].name()
                 << " min/mean/max = "
