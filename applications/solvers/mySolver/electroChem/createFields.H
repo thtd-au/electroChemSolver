@@ -83,11 +83,6 @@ Switch writeSourceFields(false);
 Switch printYFields(false);
 Switch writeYFields(false);
 
-// Diagnostics controls
-Switch diagTransportPrint(false);
-Switch diagTransportLog(false);
-wordList diagTransportSpecies(0);
-
 if (controlDict.found("species"))
 {
     const dictionary& speciesControlDict =
@@ -117,6 +112,40 @@ if (controlDict.found("species"))
             YControlDict.getOrDefault<Switch>("write", false);
     }
 }
+
+// pH controls
+const bool pHConfigured = controlDict.found("pH");
+
+Switch printPH(false);
+Switch writePH(false);
+
+if (pHConfigured)
+{
+    const dictionary& pHDict =
+        controlDict.subDict("pH");
+
+    printPH =
+        pHDict.getOrDefault<Switch>
+        (
+            "print",
+            false
+        );
+
+    writePH =
+        pHDict.getOrDefault<Switch>
+        (
+            "write",
+            false
+        );
+}
+
+const bool pHActive =
+    pHConfigured && (printPH || writePH);
+
+// Diagnostics controls
+Switch diagTransportPrint(false);
+Switch diagTransportLog(false);
+wordList diagTransportSpecies(0);
 
 Switch diagConservationPrint(false);
 Switch diagConservationLog(false);
@@ -445,6 +474,52 @@ forAll(species, i)
         )
     );
 
+}
+
+// Optional pH field
+label HplusIndex = -1;
+
+if (pHActive)
+{
+    HplusIndex = species.find("Hplus");
+
+    if (HplusIndex < 0)
+    {
+        FatalIOErrorInFunction(reactions)
+            << "pH calculation is enabled, but species Hplus "
+            << "is not listed in species." << nl
+            << "Available species are: " << species
+            << exit(FatalIOError);
+    }
+}
+
+autoPtr<volScalarField> pHPtr;
+
+if (pHActive)
+{
+    pHPtr.reset
+    (
+        new volScalarField
+        (
+            IOobject
+            (
+                "pH",
+                runTime.timeName(),
+                mesh,
+                IOobject::NO_READ,
+                writePH
+              ? IOobject::AUTO_WRITE
+              : IOobject::NO_WRITE
+            ),
+            mesh,
+            dimensionedScalar
+            (
+                "pH",
+                dimless,
+                0.0
+            )
+        )
+    );
 }
 
 //

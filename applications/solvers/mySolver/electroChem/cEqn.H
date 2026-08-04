@@ -2,7 +2,6 @@
 label inertIndex = species.find(inertSpecie);
 
 const dictionary& diffusivityDict = reactions.subDict("diffusivity");
-
 const bool hasChargeNumber = reactions.found("chargeNumber");
 
 dimensionedScalar T
@@ -26,117 +25,127 @@ dimensionedScalar Fdim
     reactions.getOrDefault<scalar>("FaradayConstant", 96485.3329)
 );
 
-// Reset concentration source terms
+// // Reset concentration source terms
+// forAll(Rc, i)
+// {
+//     Rc[i] = dimensionedScalar("zero", dimMoles/dimVolume/dimTime, 0.0);
+// }
+
 forAll(Rc, i)
 {
-    Rc[i] = dimensionedScalar("zero", dimMoles/dimVolume/dimTime, 0.0);
+    tmp<volScalarField> tSource
+    (
+        reactionMgr.kineticSource(species[i])
+    );
+
+    Rc[i] = tSource();
 }
 
 
-// Assemble reaction source terms in mol/m3/s
-if (reactions.found("reactions"))
-{
-    const dictionary& rxnDicts = reactions.subDict("reactions");
+// // Assemble reaction source terms in mol/m3/s
+// if (reactions.found("reactions"))
+// {
+//     const dictionary& rxnDicts = reactions.subDict("reactions");
 
-    forAllConstIter(dictionary, rxnDicts, iter)
-    {
-        if (!iter().isDict()) continue;
+//     forAllConstIter(dictionary, rxnDicts, iter)
+//     {
+//         if (!iter().isDict()) continue;
 
-        const dictionary& rd = iter().dict();
-        const word type(rd.get<word>("type"));
+//         const dictionary& rd = iter().dict();
+//         const word type(rd.get<word>("type"));
 
-        if (type == "multiplicativeMonod")
-        {
-            const dictionary& nuDict = rd.subDict("stoichiometry");
+//         if (type == "multiplicativeMonod")
+//         {
+//             const dictionary& nuDict = rd.subDict("stoichiometry");
 
-            wordList substrates(rd.lookup("substrates"));
-            scalarList K(rd.lookup("K"));
+//             wordList substrates(rd.lookup("substrates"));
+//             scalarList K(rd.lookup("K"));
 
-            dimensionedScalar qMax
-            (
-                "qMax",
-                dimMoles/dimTime,
-                rd.get<scalar>("qMax")
-            );
+//             dimensionedScalar qMax
+//             (
+//                 "qMax",
+//                 dimMoles/dimTime,
+//                 rd.get<scalar>("qMax")
+//             );
 
-            dimensionedScalar X
-            (
-                "X",
-                dimless/dimVolume,
-                rd.get<scalar>("X")
-            );
+//             dimensionedScalar X
+//             (
+//                 "X",
+//                 dimless/dimVolume,
+//                 rd.get<scalar>("X")
+//             );
 
-            volScalarField rate
-            (
-                IOobject
-                (
-                    "r_" + iter().keyword(),
-                    runTime.timeName(),
-                    mesh,
-                    IOobject::NO_READ,
-                    IOobject::AUTO_WRITE
-                ),
-                mesh,
-                dimensionedScalar
-                (
-                    "zero",
-                    dimMoles/dimVolume/dimTime,
-                    0.0
-                )
-            );
+//             volScalarField rate
+//             (
+//                 IOobject
+//                 (
+//                     "r_" + iter().keyword(),
+//                     runTime.timeName(),
+//                     mesh,
+//                     IOobject::NO_READ,
+//                     IOobject::AUTO_WRITE
+//                 ),
+//                 mesh,
+//                 dimensionedScalar
+//                 (
+//                     "zero",
+//                     dimMoles/dimVolume/dimTime,
+//                     0.0
+//                 )
+//             );
 
-            rate = X*qMax;
+//             rate = X*qMax;
 
-            forAll(substrates, si)
-            {
-                label subI = species.find(substrates[si]);
+//             forAll(substrates, si)
+//             {
+//                 label subI = species.find(substrates[si]);
 
-                if (subI < 0)
-                {
-                    FatalIOErrorInFunction(rd)
-                        << "Unknown substrate " << substrates[si]
-                        << exit(FatalIOError);
-                }
+//                 if (subI < 0)
+//                 {
+//                     FatalIOErrorInFunction(rd)
+//                         << "Unknown substrate " << substrates[si]
+//                         << exit(FatalIOError);
+//                 }
 
-                dimensionedScalar Ki
-                (
-                    "K_" + substrates[si],
-                    dimMoles/dimVolume,
-                    K[si]
-                );
+//                 dimensionedScalar Ki
+//                 (
+//                     "K_" + substrates[si],
+//                     dimMoles/dimVolume,
+//                     K[si]
+//                 );
 
-                rate *= c[subI]/(c[subI] + Ki);
-            }
+//                 rate *= c[subI]/(c[subI] + Ki);
+//             }
 
-            forAllConstIter(dictionary, nuDict, nIter)
-            {
-                const word specieName = nIter().keyword();
-                const label speciei = species.find(specieName);
+//             forAllConstIter(dictionary, nuDict, nIter)
+//             {
+//                 const word specieName = nIter().keyword();
+//                 const label speciei = species.find(specieName);
 
-                if (speciei < 0)
-                {
-                    FatalIOErrorInFunction(rd)
-                        << "Unknown stoichiometric species " << specieName
-                        << exit(FatalIOError);
-                }
+//                 if (speciei < 0)
+//                 {
+//                     FatalIOErrorInFunction(rd)
+//                         << "Unknown stoichiometric species " << specieName
+//                         << exit(FatalIOError);
+//                 }
 
-                const scalar nu = readScalar(nIter().stream());
+//                 const scalar nu = readScalar(nIter().stream());
 
-                Rc[speciei] += nu*rate;
-            }
-        }
-        else if (type == "waterEquilibrium")
-        {
-            // Leave equilibrium rework for later.
-        }
-        else
-        {
-            FatalIOErrorInFunction(rd)
-                << "Unknown reaction type " << type
-                << exit(FatalIOError);
-        }
-    }
-}
+//                 Rc[speciei] += nu*rate;
+//             }
+//         }
+//         else if (type == "waterEquilibrium")
+//         {
+//             // Leave equilibrium rework for later.
+//         }
+//         else
+//         {
+//             FatalIOErrorInFunction(rd)
+//                 << "Unknown reaction type " << type
+//                 << exit(FatalIOError);
+//         }
+//     }
+// }
 
 // Solve concentration transport
 forAll(c, i)
@@ -193,6 +202,49 @@ forAll(c, i)
 
         ci.max(0.0);
         ci.correctBoundaryConditions();
+    }
+}
+// Apply all fast equilibrium projections only after all species transport solves.
+reactionMgr.applyEquilibriumReactions();
+
+if (pHActive)
+{
+    volScalarField& pH =
+        pHPtr();
+
+    const volScalarField& cHplus =
+        c[HplusIndex];
+
+    const dimensionedScalar standardConcentration
+    (
+        "standardConcentration",
+        cHplus.dimensions(),
+        1000.0
+    );
+
+    const dimensionedScalar concentrationFloor
+    (
+        "concentrationFloor",
+        cHplus.dimensions(),
+        SMALL
+    );
+
+    pH =
+        -log10
+        (
+            max(cHplus, concentrationFloor)
+           /standardConcentration
+        );
+
+    pH.correctBoundaryConditions();
+
+    if (printPH)
+    {
+        Info<< "pH min/mean/max:"
+            << gMin(pH)
+            << "/" << gAverage(pH)
+            << "/" << gMax(pH)
+            << nl;
     }
 }
 

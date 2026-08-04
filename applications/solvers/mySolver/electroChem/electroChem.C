@@ -7,6 +7,7 @@
 #include "fvOptions.H"
 #include "localEulerDdtScheme.H"
 #include "fvcSmooth.H"
+#include "reactionManager.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -30,6 +31,8 @@ int main(int argc, char *argv[])
     #include "createUfIfPresent.H"
     #include "CourantNo.H"
     #include "setInitialDeltaT.H"
+
+    reactionManager reactionMgr(mesh, reactions);
 
     turbulence->validate();
 
