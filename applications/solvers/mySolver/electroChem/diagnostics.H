@@ -236,26 +236,62 @@
 
 // ############################################################ print species  ############################################################
 
-    if (printCFields)
+    if (printCFields || printCFieldsBeforeClipping)
     {
         Info<< "Concentration fields:" << nl;
 
-        forAll(c, i)
+        if (printCFieldsBeforeClipping)
         {
-            const scalar cMin = gMin(c[i].primitiveField());
-            const scalar cMax = gMax(c[i].primitiveField());
-            const scalar cMean = gSum(c[i].primitiveField()*mesh.V())/gSum(mesh.V());
+            Info<< "  Pre-clipping:" << nl;
 
-            Info<< "  " << c[i].name()
-                << " min/mean/max = "
-                << cMin << " / "
-                << cMean << " / "
-                << cMax
-                << " mol/m3"
-                << nl;
+            forAll(c, i)
+            {
+                Info<< "    " << c[i].name()
+                    << " min/mean/max = "
+                    << cMinBeforeClipping[i] << " / "
+                    << cMeanBeforeClipping[i] << " / "
+                    << cMaxBeforeClipping[i]
+                    << " mol/m3"
+                    << nl;
+            }
         }
 
-        Info<< endl;
+        if (printCFields)
+        {
+            if (printCFieldsBeforeClipping)
+            {
+                Info<< "  After clipping:" << nl;
+            }
+
+            forAll(c, i)
+            {
+                const scalar cMin =
+                    gMin(c[i].primitiveField());
+
+                const scalar cMean =
+                    gSum(c[i].primitiveField()*mesh.V())
+                /gSum(mesh.V());
+
+                const scalar cMax =
+                    gMax(c[i].primitiveField());
+
+                Info<<
+                    (
+                        printCFieldsBeforeClipping
+                    ? "    "
+                    : "  "
+                    )
+                    << c[i].name()
+                    << " min/mean/max = "
+                    << cMin << " / "
+                    << cMean << " / "
+                    << cMax
+                    << " mol/m3"
+                    << nl;
+            }
+        }
+
+        Info<< nl;
     }
 
     if (printYFields)

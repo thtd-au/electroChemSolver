@@ -79,6 +79,7 @@ const dictionary& controlDict = runTime.controlDict();
 
 // Species control
 Switch printCFields(false);
+Switch printCFieldsBeforeClipping(false);
 Switch writeSourceFields(false);
 Switch printYFields(false);
 Switch writeYFields(false);
@@ -90,26 +91,22 @@ if (controlDict.found("species"))
 
     if (speciesControlDict.found("c"))
     {
-        const dictionary& cControlDict =
-            speciesControlDict.subDict("c");
+        const dictionary& cControlDict = speciesControlDict.subDict("c");
 
-        printCFields =
-            cControlDict.getOrDefault<Switch>("print", false);
+        printCFields = cControlDict.getOrDefault<Switch>("print", false);
 
-        writeSourceFields =
-            cControlDict.getOrDefault<Switch>("writeSources", false);
+        printCFieldsBeforeClipping = cControlDict.getOrDefault<Switch>("printBeforeClipping",false);
+
+        writeSourceFields = cControlDict.getOrDefault<Switch>("writeSources", false);
     }
 
     if (speciesControlDict.found("Y"))
     {
-        const dictionary& YControlDict =
-            speciesControlDict.subDict("Y");
+        const dictionary& YControlDict = speciesControlDict.subDict("Y");
 
-        printYFields =
-            YControlDict.getOrDefault<Switch>("print", false);
+        printYFields = YControlDict.getOrDefault<Switch>("print", false);
 
-        writeYFields =
-            YControlDict.getOrDefault<Switch>("write", false);
+        writeYFields = YControlDict.getOrDefault<Switch>("write", false);
     }
 }
 
@@ -124,19 +121,9 @@ if (pHConfigured)
     const dictionary& pHDict =
         controlDict.subDict("pH");
 
-    printPH =
-        pHDict.getOrDefault<Switch>
-        (
-            "print",
-            false
-        );
-
-    writePH =
-        pHDict.getOrDefault<Switch>
-        (
-            "write",
-            false
-        );
+    printPH = pHDict.getOrDefault<Switch>("print",false);
+    
+    writePH = pHDict.getOrDefault<Switch>("write",false);
 }
 
 const bool pHActive =

@@ -248,7 +248,6 @@ tmp<volScalarField> reactionManager::zeroSource
     );
 }
 
-
 tmp<volScalarField> reactionManager::kineticSource
 (
     const word& speciesName

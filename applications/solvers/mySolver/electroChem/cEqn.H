@@ -25,12 +25,6 @@ dimensionedScalar Fdim
     reactions.getOrDefault<scalar>("FaradayConstant", 96485.3329)
 );
 
-// // Reset concentration source terms
-// forAll(Rc, i)
-// {
-//     Rc[i] = dimensionedScalar("zero", dimMoles/dimVolume/dimTime, 0.0);
-// }
-
 forAll(Rc, i)
 {
     tmp<volScalarField> tSource
@@ -41,111 +35,29 @@ forAll(Rc, i)
     Rc[i] = tSource();
 }
 
+// Store concentration statistics before positivity clipping.
+// These are printed later in diagnostics.H so that solver output
+// is not interrupted by diagnostic messages.
+scalarList cMinBeforeClipping(c.size(), 0.0);
+scalarList cMeanBeforeClipping(c.size(), 0.0);
+scalarList cMaxBeforeClipping(c.size(), 0.0);
 
-// // Assemble reaction source terms in mol/m3/s
-// if (reactions.found("reactions"))
-// {
-//     const dictionary& rxnDicts = reactions.subDict("reactions");
+const scalar domainVolume = gSum(mesh.V());
 
-//     forAllConstIter(dictionary, rxnDicts, iter)
-//     {
-//         if (!iter().isDict()) continue;
+// Initialise all species, including the inert species.
+// Active species values are overwritten immediately after their solves.
+forAll(c, i)
+{
+    cMinBeforeClipping[i] =
+        gMin(c[i].primitiveField());
 
-//         const dictionary& rd = iter().dict();
-//         const word type(rd.get<word>("type"));
+    cMeanBeforeClipping[i] =
+        gSum(c[i].primitiveField()*mesh.V())
+       /domainVolume;
 
-//         if (type == "multiplicativeMonod")
-//         {
-//             const dictionary& nuDict = rd.subDict("stoichiometry");
-
-//             wordList substrates(rd.lookup("substrates"));
-//             scalarList K(rd.lookup("K"));
-
-//             dimensionedScalar qMax
-//             (
-//                 "qMax",
-//                 dimMoles/dimTime,
-//                 rd.get<scalar>("qMax")
-//             );
-
-//             dimensionedScalar X
-//             (
-//                 "X",
-//                 dimless/dimVolume,
-//                 rd.get<scalar>("X")
-//             );
-
-//             volScalarField rate
-//             (
-//                 IOobject
-//                 (
-//                     "r_" + iter().keyword(),
-//                     runTime.timeName(),
-//                     mesh,
-//                     IOobject::NO_READ,
-//                     IOobject::AUTO_WRITE
-//                 ),
-//                 mesh,
-//                 dimensionedScalar
-//                 (
-//                     "zero",
-//                     dimMoles/dimVolume/dimTime,
-//                     0.0
-//                 )
-//             );
-
-//             rate = X*qMax;
-
-//             forAll(substrates, si)
-//             {
-//                 label subI = species.find(substrates[si]);
-
-//                 if (subI < 0)
-//                 {
-//                     FatalIOErrorInFunction(rd)
-//                         << "Unknown substrate " << substrates[si]
-//                         << exit(FatalIOError);
-//                 }
-
-//                 dimensionedScalar Ki
-//                 (
-//                     "K_" + substrates[si],
-//                     dimMoles/dimVolume,
-//                     K[si]
-//                 );
-
-//                 rate *= c[subI]/(c[subI] + Ki);
-//             }
-
-//             forAllConstIter(dictionary, nuDict, nIter)
-//             {
-//                 const word specieName = nIter().keyword();
-//                 const label speciei = species.find(specieName);
-
-//                 if (speciei < 0)
-//                 {
-//                     FatalIOErrorInFunction(rd)
-//                         << "Unknown stoichiometric species " << specieName
-//                         << exit(FatalIOError);
-//                 }
-
-//                 const scalar nu = readScalar(nIter().stream());
-
-//                 Rc[speciei] += nu*rate;
-//             }
-//         }
-//         else if (type == "waterEquilibrium")
-//         {
-//             // Leave equilibrium rework for later.
-//         }
-//         else
-//         {
-//             FatalIOErrorInFunction(rd)
-//                 << "Unknown reaction type " << type
-//                 << exit(FatalIOError);
-//         }
-//     }
-// }
+    cMaxBeforeClipping[i] =
+        gMax(c[i].primitiveField());
+}
 
 // Solve concentration transport
 forAll(c, i)
@@ -199,6 +111,20 @@ forAll(c, i)
         fvOptions.constrain(ciEqn);
         ciEqn.solve(ci.name());
         fvOptions.correct(ci);
+
+        // Save the raw transport solution before positivity clipping.
+        if (printCFieldsBeforeClipping)
+        {
+            cMinBeforeClipping[i] =
+                gMin(ci.primitiveField());
+
+            cMeanBeforeClipping[i] =
+                gSum(ci.primitiveField()*mesh.V())
+            /domainVolume;
+
+            cMaxBeforeClipping[i] =
+                gMax(ci.primitiveField());
+        }
 
         ci.max(0.0);
         ci.correctBoundaryConditions();
