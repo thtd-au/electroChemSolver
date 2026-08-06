@@ -13,15 +13,18 @@ reactionManager::reactionManager
 :
     mesh_(mesh),
     reactionsDict_(reactionsDict),
-    kineticReactions_(),
+    reversibleKineticReactions_(),
+    monodReactions_(),
     equilibriumReactions_()
 {
     readKineticReactions();
     readEquilibriumReactions();
 
     Info<< "Reaction manager loaded:" << nl
-        << "    kinetic reactions: "
-        << kineticReactions_.size() << nl
+        << "    reversible kineti   c reactions: "
+        << reversibleKineticReactions_.size() << nl
+        << "    multiplicative Monod reactions: "
+        << monodReactions_.size() << nl
         << "    equilibrium reactions: "
         << equilibriumReactions_.size() << nl;
 }
@@ -33,7 +36,8 @@ void reactionManager::readKineticReactions()
     {
         Info<< "No kineticReactions dictionary found." << nl;
 
-        kineticReactions_.setSize(0);
+        monodReactions_.setSize(0);
+        reversibleKineticReactions_.setSize(0);
         return;
     }
 
@@ -43,8 +47,10 @@ void reactionManager::readKineticReactions()
     const wordList reactionNames =
         kineticDict.toc();
 
-    kineticReactions_.setSize(reactionNames.size());
+    label nMonod = 0;
+    label nReversible = 0;
 
+    // First pass: count each concrete model type.
     forAll(reactionNames, reactioni)
     {
         const word& reactionName =
@@ -66,25 +72,72 @@ void reactionManager::readKineticReactions()
             reactionDict.lookup("type")
         );
 
-        if (modelType != "multiplicativeMonod")
+        if (modelType == "multiplicativeMonod")
+        {
+            ++nMonod;
+        }
+        else if (modelType == "reversibleKineticReaction")
+        {
+            ++nReversible;
+        }
+        else
         {
             FatalIOErrorInFunction(reactionDict)
                 << "Unsupported kinetic reaction type "
                 << modelType << nl
-                << "Currently supported type: multiplicativeMonod"
+                << "Supported types are:" << nl
+                << "    multiplicativeMonod" << nl
+                << "    reversibleKineticReaction"
                 << exit(FatalIOError);
         }
+    }
 
-        kineticReactions_.set
+    monodReactions_.setSize(nMonod);
+    reversibleKineticReactions_.setSize(nReversible);
+
+    label monodI = 0;
+    label reversibleI = 0;
+
+    // Second pass: construct the reactions.
+    forAll(reactionNames, reactioni)
+    {
+        const word& reactionName =
+            reactionNames[reactioni];
+
+        const dictionary& reactionDict =
+            kineticDict.subDict(reactionName);
+
+        const word modelType
         (
-            reactioni,
-            new multiplicativeMonod
-            (
-                reactionName,
-                mesh_,
-                reactionDict
-            )
+            reactionDict.lookup("type")
         );
+
+        if (modelType == "multiplicativeMonod")
+        {
+            monodReactions_.set
+            (
+                monodI++,
+                new multiplicativeMonod
+                (
+                    reactionName,
+                    mesh_,
+                    reactionDict
+                )
+            );
+        }
+        else if (modelType == "reversibleKineticReaction")
+        {
+            reversibleKineticReactions_.set
+            (
+                reversibleI++,
+                new reversibleKineticReaction
+                (
+                    reactionName,
+                    mesh_,
+                    reactionDict
+                )
+            );
+        }
     }
 }
 
@@ -207,10 +260,17 @@ tmp<volScalarField> reactionManager::kineticSource
     volScalarField& combinedSource =
         tCombinedSource.ref();
 
-    forAll(kineticReactions_, reactioni)
+    forAll(monodReactions_, reactioni)
     {
         combinedSource +=
-            kineticReactions_[reactioni].source(speciesName);
+            monodReactions_[reactioni].source(speciesName);
+    }
+
+    forAll(reversibleKineticReactions_, reactioni)
+    {
+        combinedSource +=
+            reversibleKineticReactions_[reactioni]
+           .source(speciesName);
     }
 
     return tCombinedSource;

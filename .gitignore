@@ -13,6 +13,13 @@ platforms/
 *.a
 *.la
 
+# Ignore generated Make build directory
+**/Make/linux*/
+
+# Keep top-level build config
+!**/Make/files
+!**/Make/options
+
 # -----------------------------------------------------------------------------
 # Dynamic runtime compilation
 # -----------------------------------------------------------------------------

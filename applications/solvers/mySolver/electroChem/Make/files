@@ -1,3 +1,4 @@
+reactionModels/kineticReactions/reversibleKineticReaction/reversibleKineticReaction.C
 reactionModels/kineticReactions/multiplicativeMonod/multiplicativeMonod.C
 reactionModels/equilibriumReactions/waterEquilibrium/waterEquilibrium.C
 reactionModels/reactionManager.C

@@ -6,8 +6,10 @@
 #include "PtrList.H"
 #include "volFields.H"
 
+#include "kineticReactions/reversibleKineticReaction/reversibleKineticReaction.H"
 #include "kineticReactions/multiplicativeMonod/multiplicativeMonod.H"
 #include "equilibriumReactions/waterEquilibrium/waterEquilibrium.H"
+
 
 namespace Foam
 {
@@ -21,7 +23,8 @@ private:
     // Reference to the dictionary already read in createFields.H
     const dictionary& reactionsDict_;
 
-    PtrList<multiplicativeMonod> kineticReactions_;
+    PtrList<reversibleKineticReaction> reversibleKineticReactions_;
+    PtrList<multiplicativeMonod> monodReactions_;
     PtrList<waterEquilibrium> equilibriumReactions_;
 
     void readKineticReactions();
@@ -49,7 +52,7 @@ public:
 
     label nKineticReactions() const
     {
-        return kineticReactions_.size();
+        return monodReactions_.size() + reversibleKineticReactions_.size();
     }
 
     label nEquilibriumReactions() const

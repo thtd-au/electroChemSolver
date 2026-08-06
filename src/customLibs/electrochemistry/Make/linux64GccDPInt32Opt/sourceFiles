@@ -1,5 +1,0 @@
-SOURCE = \
-derivedFvPatchFields/MolarFlux/faradaicMolarFlux.C \
-derivedFvPatchFields/MolarFlux/pHConcentration.C \
-
-# sources
