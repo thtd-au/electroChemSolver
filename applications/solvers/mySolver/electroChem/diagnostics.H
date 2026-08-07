@@ -3,6 +3,7 @@
 
 {
     const scalar dt = runTime.deltaTValue();
+    const bool diagWriteTime = runTime.writeTime();
 
     const dictionary& diffusivityDict = reactions.subDict("diffusivity");
     const bool hasChargeNumber = reactions.found("chargeNumber");
@@ -443,7 +444,7 @@
                     << nl;
             }
 
-            if (diagTransportLog && transportLogPtr.valid())
+            if (diagWriteTime && diagTransportLog && transportLogPtr.valid())
             {
                 transportLogPtr()
                     << runTime.value() << ' '
@@ -637,7 +638,7 @@
                 }
             }
 
-            if (diagConservationLog && conservationLogPtr.valid())
+            if (diagWriteTime && diagConservationLog && conservationLogPtr.valid())
             {
                 OFstream& os = conservationLogPtr();
 
@@ -779,7 +780,7 @@
             Info<< endl;
         }
 
-        if (diagChargeLog && chargeLogPtr.valid())
+        if (diagWriteTime && diagChargeLog && chargeLogPtr.valid())
         {
             OFstream& os = chargeLogPtr();
 
@@ -985,11 +986,7 @@ if (diagDebyeActive)
             << endl;
     }
 
-    if
-    (
-        diagDebyeLog
-     && DebyeLogPtr.valid()
-    )
+    if (diagWriteTime && diagDebyeLog && DebyeLogPtr.valid())
     {
         DebyeLogPtr()
             << runTime.value() << ' '
@@ -1080,7 +1077,7 @@ if (diagDebyeActive)
             }
 
             // No collective operations inside this master-only block.
-            if (saturationLogPtr.valid())
+            if (diagWriteTime && saturationLogPtr.valid())
             {
                 saturationLogPtr()
                     << runTime.value() << ' '

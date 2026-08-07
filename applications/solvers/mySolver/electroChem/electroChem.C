@@ -115,10 +115,7 @@ int main(int argc, char *argv[])
             
         #include "YEqn.H"
         
-        if (runTime.writeTime())
-        {
-            #include "diagnostics.H"
-        }
+        #include "diagnostics.H"
 
         runTime.write();
 
