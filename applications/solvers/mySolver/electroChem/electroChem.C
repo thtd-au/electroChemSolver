@@ -33,6 +33,10 @@ int main(int argc, char *argv[])
     #include "setInitialDeltaT.H"
 
     reactionManager reactionMgr(mesh, reactions);
+    // Establish instantaneous equilibria before calculating initial conductivity
+    reactionMgr.applyEquilibriumReactions();
+    // initilize potential gradient for first iteration 
+    #include "phiEqn.H" 
 
     turbulence->validate();
 
@@ -112,7 +116,7 @@ int main(int argc, char *argv[])
 
         // electroChem.C time loop
         #include "cEqn.H"
-            
+        #include "phiEqn.H"
         #include "YEqn.H"
         
         #include "diagnostics.H"

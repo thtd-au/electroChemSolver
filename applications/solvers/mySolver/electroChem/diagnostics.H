@@ -15,27 +15,6 @@
         zDictPtr = &reactions.subDict("chargeNumber");
     }
 
-    dimensionedScalar T
-    (
-        "T_diag",
-        dimensionSet(0, 0, 0, 1, 0, 0, 0),
-        reactions.getOrDefault<scalar>("temperature", 298.15)
-    );
-
-    dimensionedScalar Rgas
-    (
-        "R_diag",
-        dimensionSet(1, 2, -2, -1, -1, 0, 0),
-        8.31446261815324
-    );
-
-    dimensionedScalar Fdim
-    (
-        "FaradayConstant_diag",
-        dimensionSet(0, 0, 1, 0, -1, 1, 0),
-        reactions.getOrDefault<scalar>("FaradayConstant", 96485.3329)
-    );
-
     static bool diagnosticsInitialised(false);
 
     static List<scalar> N0;
@@ -372,8 +351,7 @@
                     IOobject::NO_WRITE
                 ),
                 fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)
-              * fvc::snGrad(phiE)
-              * mesh.magSf()
+              * (fvc::interpolate(gradPhiE) & mesh.Sf())
             );
 
             volScalarField advTerm
@@ -528,11 +506,11 @@
                 tmp<scalarField> tsnGradCp = cp.snGrad();
                 const scalarField& snGradCp = tsnGradCp();
 
-                const fvPatchScalarField& phiEp =
-                    phiE.boundaryField()[patchi];
+                const fvPatchVectorField& gradPhiEp =
+                    gradPhiE.boundaryField()[patchi];
 
-                tmp<scalarField> tsnGradPhiEp = phiEp.snGrad();
-                const scalarField& snGradPhiEp = tsnGradPhiEp();
+                const fvsPatchVectorField& Sfp =
+                    mesh.Sf().boundaryField()[patchi];
 
                 scalar patchFlowIn = 0.0;
                 scalar patchFlowOut = 0.0;
@@ -554,8 +532,7 @@
                        *Fdim.value()
                        /(Rgas.value()*T.value())
                        *cp[facei]
-                       *snGradPhiEp[facei]
-                       *magSfp[facei];
+                       *(gradPhiEp[facei] & Sfp[facei]);
 
                     const scalar flow = adv + diff + mig;
 
@@ -834,27 +811,6 @@ if (diagDebyeActive)
             0.0
         );
         
-    dimensionedScalar epsilon
-    (
-        "permittivity",
-        dimensionSet(-1, -3, 4, 0, 0, 2, 0),
-        reactions
-    );
-
-    if (epsilon.value() <= SMALL)
-    {
-        FatalIOErrorInFunction(reactions)
-            << "permittivity must be positive"
-            << exit(FatalIOError);
-    }
-
-    if (T.value() <= SMALL)
-    {
-        FatalIOErrorInFunction(reactions)
-            << "temperature must be positive"
-            << exit(FatalIOError);
-    }
-
     ionicSumField =
         dimensionedScalar
         (

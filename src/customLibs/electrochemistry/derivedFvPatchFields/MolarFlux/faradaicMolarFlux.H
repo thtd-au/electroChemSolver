@@ -12,7 +12,6 @@ class faradaicMolarFlux
 {
     scalar stoichCoeff_;
     scalar nElectrons_;
-    scalar currentDensity_;
 
 public:
 

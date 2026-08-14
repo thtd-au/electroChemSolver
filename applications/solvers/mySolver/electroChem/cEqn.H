@@ -4,25 +4,17 @@ label inertIndex = species.find(inertSpecie);
 const dictionary& diffusivityDict = reactions.subDict("diffusivity");
 const bool hasChargeNumber = reactions.found("chargeNumber");
 
-dimensionedScalar T
+surfaceScalarField gradPhiEFlux
 (
-    "T",
-    dimensionSet(0, 0, 0, 1, 0, 0, 0),
-    reactions.getOrDefault<scalar>("temperature", 298.15)
-);
-
-dimensionedScalar Rgas
-(
-    "R",
-    dimensionSet(1, 2, -2, -1, -1, 0, 0),
-    8.31446261815324
-);
-
-dimensionedScalar Fdim
-(
-    "FaradayConstant",
-    dimensionSet(0, 0, 1, 0, -1, 1, 0),
-    reactions.getOrDefault<scalar>("FaradayConstant", 96485.3329)
+    IOobject
+    (
+        "gradPhiEFlux",
+        runTime.timeName(),
+        mesh,
+        IOobject::NO_READ,
+        IOobject::NO_WRITE
+    ),
+    fvc::interpolate(gradPhiE) & mesh.Sf()
 );
 
 forAll(Rc, i)
@@ -92,8 +84,7 @@ forAll(c, i)
                 IOobject::NO_WRITE
             ),
             fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)
-          * fvc::snGrad(phiE)
-          * mesh.magSf()
+          * gradPhiEFlux
         );
 
         fvScalarMatrix ciEqn
