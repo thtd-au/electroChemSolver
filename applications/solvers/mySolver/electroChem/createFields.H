@@ -236,16 +236,24 @@ if (pHConfigured)
 const bool pHActive =
     pHConfigured && (printPH || writePH);
 
+
 // Diagnostics controls
+
+scalar diagLogInterval(1.0);
+
 Switch diagTransportPrint(false);
 Switch diagTransportLog(false);
 wordList diagTransportSpecies(0);
+word diagTransportReactionMode("total"); // total | split
 
 Switch diagConservationPrint(false);
 Switch diagConservationLog(false);
-word diagConservationMode("full");
+word diagConservationMode("residuals"); // residuals | breakdown
 wordList diagFlowPatches(0);
 wordList diagElectrodePatches(0);
+
+Switch diagElectrodeFluxStabilityPrint(false);
+Switch diagElectrodeFluxStabilityLog(false);
 
 word diagChargeOutput("molarCharge");  // molarCharge | chargeDensity | both
 Switch diagChargePrint(false);
@@ -276,12 +284,36 @@ if (controlDict.found("diagnostics"))
 {
     const dictionary& diagDict = controlDict.subDict("diagnostics");
 
+    diagLogInterval =
+        diagDict.getOrDefault<scalar>("logInterval", diagLogInterval);
+
+    if (diagLogInterval <= SMALL)
+    {
+        FatalIOErrorInFunction(diagDict)
+            << "diagnostics/logInterval must be positive"
+            << exit(FatalIOError);
+    }
+
     if (diagDict.found("transport"))
     {
         const dictionary& d = diagDict.subDict("transport");
 
         diagTransportPrint = d.getOrDefault<Switch>("print", false);
         diagTransportLog   = d.getOrDefault<Switch>("log", false);
+        diagTransportReactionMode =
+            d.getOrDefault<word>("reactionMode", word("total"));
+
+        if
+        (
+            diagTransportReactionMode != "total"
+         && diagTransportReactionMode != "split"
+        )
+        {
+            FatalIOErrorInFunction(d)
+                << "diagnostics/transport/reactionMode must be "
+                << "total or split"
+                << exit(FatalIOError);
+        }
 
         if (d.found("species"))
         {
@@ -301,17 +333,17 @@ if (controlDict.found("diagnostics"))
             d.getOrDefault<Switch>("log", false);
 
         diagConservationMode =
-            d.getOrDefault<word>("mode", word("full"));
+            d.getOrDefault<word>("mode", word("residuals"));
 
         if
         (
-            diagConservationMode != "full"
-        && diagConservationMode != "residuals"
+            diagConservationMode != "residuals"
+         && diagConservationMode != "breakdown"
         )
         {
             FatalIOErrorInFunction(d)
                 << "diagnostics/conservation/mode must be "
-                << "full or residuals"
+                << "residuals or breakdown"
                 << exit(FatalIOError);
         }
 
@@ -326,6 +358,18 @@ if (controlDict.found("diagnostics"))
             diagElectrodePatches =
                 wordList(d.lookup("electrodePatches"));
         }
+    }
+
+    if (diagDict.found("electrodeFluxStability"))
+    {
+        const dictionary& d =
+            diagDict.subDict("electrodeFluxStability");
+
+        diagElectrodeFluxStabilityPrint =
+            d.getOrDefault<Switch>("print", false);
+
+        diagElectrodeFluxStabilityLog =
+            d.getOrDefault<Switch>("log", false);
     }
 
     if (diagDict.found("charge"))
@@ -460,6 +504,10 @@ const bool diagTransportActive =
 const bool diagConservationActive =
     diagConservationPrint || diagConservationLog;
 
+const bool diagElectrodeFluxStabilityActive =
+    diagElectrodeFluxStabilityPrint
+ || diagElectrodeFluxStabilityLog;
+
 const bool diagChargeActive =
     diagChargePrint || diagChargeLog || diagChargeWrite;
 
@@ -481,6 +529,7 @@ const bool diagSaturationActive =
 
 (void)diagTransportActive;
 (void)diagConservationActive;
+(void)diagElectrodeFluxStabilityActive;
 (void)diagChargeActive;
 (void)diagSaturationActive;
 (void)diagDebyeActive;
@@ -524,6 +573,8 @@ if (reactions.found("chargeNumber"))
 PtrList<volScalarField> c(species.size());
 PtrList<volScalarField> Y(species.size());
 PtrList<volScalarField> Rc(species.size());
+PtrList<volScalarField> Req(species.size());
+
 
 forAll(species, i)
 {
@@ -595,6 +646,36 @@ forAll(species, i)
         )
     );
 
+    Req.set
+    (
+        i,
+        new volScalarField
+        (
+            IOobject
+            (
+                "Req_" + specieName,
+                runTime.timeName(),
+                mesh,
+                IOobject::NO_READ,
+                writeSourceFields
+                ? IOobject::AUTO_WRITE
+                : IOobject::NO_WRITE
+            ),
+            mesh,
+            dimensionedScalar("zero", dimMoles/dimVolume/dimTime, 0.0)
+        )
+    );
+
+}
+// Initial species inventories used by conservation diagnostics.
+// Store these before the first time step so the conservation balance
+// is anchored to the actual case initial condition.
+scalarList initialSpeciesInventory(c.size(), 0.0);
+
+forAll(c, i)
+{
+    initialSpeciesInventory[i] =
+        gSum(c[i].primitiveField()*mesh.V());
 }
 
 // Optional pH field

@@ -1,5 +1,5 @@
 derivedFvPatchFields/MolarFlux/faradaicMolarFlux.C
-derivedFvPatchFields/MolarFlux/pHConcentration.C
+derivedFvPatchFields/MolarFlux/robinMolarFlux.C
 
 LIB = $(FOAM_USER_LIBBIN)/libCustomBCs
 

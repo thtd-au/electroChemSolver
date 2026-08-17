@@ -121,11 +121,49 @@ forAll(c, i)
         ci.correctBoundaryConditions();
     }
 }
+
+// Store internal concentrations immediately before the fast equilibrium projection. 
+List<scalarField> cBeforeEquilibrium(c.size());
+
+forAll(c, i)
+{
+    cBeforeEquilibrium[i] = c[i].primitiveField();
+
+    Req[i] =
+        dimensionedScalar
+        (
+            "zero",
+            dimMoles/dimVolume/dimTime,
+            0.0
+        );
+}
+
 // Apply all fast equilibrium projections only after all species transport solves.
 reactionMgr.applyEquilibriumReactions();
 
+const scalar invDeltaT = 1.0/runTime.deltaTValue();
+
+forAll(c, i)
+{
+    scalarField& ReqInternal = Req[i].primitiveFieldRef();
+
+    ReqInternal =
+        (c[i].primitiveField() - cBeforeEquilibrium[i])*invDeltaT;
+
+    // Equilibrium source bookkeeping is intentionally internal-cell only.
+    // Boundary changes caused by correctBoundaryConditions() belong to the
+    // boundary transport balance, not the volume equilibrium source.
+    forAll(Req[i].boundaryField(), patchi)
+    {
+        Req[i].boundaryFieldRef()[patchi] == 0.0;
+    }
+}
+
+
 if (pHActive)
 {
+    Info<< "pH fields:" << nl;
+
     volScalarField& pH =
         pHPtr();
 
@@ -157,11 +195,12 @@ if (pHActive)
 
     if (printPH)
     {
-        Info<< "pH min/mean/max:"
+        Info<< "  pH min/mean/max:"
             << gMin(pH)
             << "/" << gAverage(pH)
             << "/" << gMax(pH)
             << nl;
     }
+    Info<< endl;
 }
 

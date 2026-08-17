@@ -1,48 +1,54 @@
-#ifndef inertMassFractionFvPatchScalarField_H
-#define inertMassFractionFvPatchScalarField_H
+#ifndef robinMolarFlux_H
+#define robinMolarFlux_H
 
-#include "fixedValueFvPatchFields.H"
+#include "mixedFvPatchFields.H"
 
 namespace Foam
 {
 
-class inertMassFractionFvPatchScalarField
+class robinMolarFlux
 :
-    public fixedValueFvPatchScalarField
+    public mixedFvPatchScalarField
 {
+    // Stoichiometric coefficient in the electrode half reaction.
+    scalar stoichCoeff_;
+
+    // Number of electrons transferred in the electrode half reaction.
+    scalar nElectrons_;
+
 public:
 
-    TypeName("inertMassFraction");
+    TypeName("robinMolarFlux");
 
-    inertMassFractionFvPatchScalarField
+    robinMolarFlux
     (
         const fvPatch&,
         const DimensionedField<scalar, volMesh>&
     );
 
-    inertMassFractionFvPatchScalarField
+    robinMolarFlux
     (
-        const inertMassFractionFvPatchScalarField&,
+        const robinMolarFlux&,
         const fvPatch&,
         const DimensionedField<scalar, volMesh>&,
         const fvPatchFieldMapper&
     );
 
-    inertMassFractionFvPatchScalarField
+    robinMolarFlux
     (
         const fvPatch&,
         const DimensionedField<scalar, volMesh>&,
         const dictionary&
     );
 
-    inertMassFractionFvPatchScalarField
+    robinMolarFlux
     (
-        const inertMassFractionFvPatchScalarField&
+        const robinMolarFlux&
     );
 
-    inertMassFractionFvPatchScalarField
+    robinMolarFlux
     (
-        const inertMassFractionFvPatchScalarField&,
+        const robinMolarFlux&,
         const DimensionedField<scalar, volMesh>&
     );
 
@@ -50,7 +56,7 @@ public:
     {
         return tmp<fvPatchScalarField>
         (
-            new inertMassFractionFvPatchScalarField(*this)
+            new robinMolarFlux(*this)
         );
     }
 
@@ -61,7 +67,7 @@ public:
     {
         return tmp<fvPatchScalarField>
         (
-            new inertMassFractionFvPatchScalarField(*this, iF)
+            new robinMolarFlux(*this, iF)
         );
     }
 
@@ -70,7 +76,7 @@ public:
     virtual void write(Ostream&) const;
 };
 
-}
+} // End namespace Foam
 
 #endif
 

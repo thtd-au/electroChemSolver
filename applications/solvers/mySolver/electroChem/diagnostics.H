@@ -3,7 +3,6 @@
 
 {
     const scalar dt = runTime.deltaTValue();
-    const bool diagWriteTime = runTime.writeTime();
 
     const dictionary& diffusivityDict = reactions.subDict("diffusivity");
     const bool hasChargeNumber = reactions.found("chargeNumber");
@@ -15,35 +14,78 @@
         zDictPtr = &reactions.subDict("chargeNumber");
     }
 
+    // Diagnostic log cadence is based on physical simulation time and is
+    // independent of controlDict writeInterval/writeControl.
+    static bool diagLogScheduleInitialised(false);
+    static scalar nextDiagLogTime(0.0);
+
+    if (!diagLogScheduleInitialised)
+    {
+        nextDiagLogTime =
+            runTime.startTime().value() + diagLogInterval;
+
+        diagLogScheduleInitialised = true;
+    }
+
+    const scalar diagTimeTolerance =
+        10.0*SMALL*max(mag(runTime.value()), scalar(1.0));
+
+    bool diagLogTime(false);
+
+    if (runTime.value() + diagTimeTolerance >= nextDiagLogTime)
+    {
+        diagLogTime = true;
+
+        // If a variable/large timestep jumps over more than one requested
+        // diagnostic time, write once at the current solver time and advance
+        // the schedule until the next target lies in the future.
+        do
+        {
+            nextDiagLogTime += diagLogInterval;
+        }
+        while
+        (
+            nextDiagLogTime
+         <= runTime.value() + diagTimeTolerance
+        );
+    }
+
     static bool diagnosticsInitialised(false);
 
+    // Cumulative signed additions to the domain [mol].
+    // Positive = net addition to the computational domain.
     static List<scalar> N0;
-    static List<scalar> cumulativeFlowIn;
-    static List<scalar> cumulativeFlowOut;
-    static List<scalar> cumulativeReaction;
+    static List<scalar> cumulativeAdvection;
+    static List<scalar> cumulativeDiffusion;
+    static List<scalar> cumulativeMigration;
+    static List<scalar> cumulativeKinetic;
+    static List<scalar> cumulativeEquilibrium;
 
     static autoPtr<OFstream> transportLogPtr;
     static autoPtr<OFstream> conservationLogPtr;
+    static autoPtr<OFstream> electrodeFluxStabilityLogPtr;
     static autoPtr<OFstream> chargeLogPtr;
     static autoPtr<OFstream> saturationLogPtr;
     static autoPtr<OFstream> DebyeLogPtr;
 
     // Patch roles for conservation:
-    // 0 = ignored, 1 = flow patch, 2 = electrode patch
+    // 0 = ignored, 1 = flow patch, 2 = electrode patch.
     static List<label> conservationPatchRole;
 
     if (!diagnosticsInitialised)
     {
         N0.setSize(c.size(), 0.0);
-        cumulativeFlowIn.setSize(c.size(), 0.0);
-        cumulativeFlowOut.setSize(c.size(), 0.0);
-        cumulativeReaction.setSize(c.size(), 0.0);
+        cumulativeAdvection.setSize(c.size(), 0.0);
+        cumulativeDiffusion.setSize(c.size(), 0.0);
+        cumulativeMigration.setSize(c.size(), 0.0);
+        cumulativeKinetic.setSize(c.size(), 0.0);
+        cumulativeEquilibrium.setSize(c.size(), 0.0);
 
         conservationPatchRole.setSize(mesh.boundary().size(), 0);
 
         forAll(c, i)
         {
-            N0[i] = gSum(c[i].primitiveField()*mesh.V());
+            N0[i] = initialSpeciesInventory[i];
         }
 
         forAll(diagFlowPatches, i)
@@ -56,6 +98,14 @@
                 FatalErrorInFunction
                     << "Unknown diagnostics/conservation flow patch "
                     << diagFlowPatches[i]
+                    << exit(FatalError);
+            }
+
+            if (conservationPatchRole[patchi] != 0)
+            {
+                FatalErrorInFunction
+                    << "Patch " << diagFlowPatches[i]
+                    << " is listed more than once in diagnostics/conservation"
                     << exit(FatalError);
             }
 
@@ -75,12 +125,24 @@
                     << exit(FatalError);
             }
 
+            if (conservationPatchRole[patchi] != 0)
+            {
+                FatalErrorInFunction
+                    << "Patch " << diagElectrodePatches[i]
+                    << " is listed more than once in diagnostics/conservation"
+                    << exit(FatalError);
+            }
+
             conservationPatchRole[patchi] = 2;
         }
 
         if (Pstream::master())
         {
-            fileName diagDir(runTime.globalPath()/"postProcessing"/"diagnostics");
+            fileName diagDir
+            (
+                runTime.globalPath()/"postProcessing"/"diagnostics"
+            );
+
             mkDir(diagDir);
 
             if (diagTransportLog)
@@ -90,11 +152,22 @@
                     new OFstream(diagDir/"transport.dat")
                 );
 
-                transportLogPtr()
-                    << "# time species "
-                    << "advMax diffMax migMax rxnMax "
-                    << "advInt diffInt migInt rxnInt"
-                    << nl;
+                if (diagTransportReactionMode == "total")
+                {
+                    transportLogPtr()
+                        << "# time species "
+                        << "advMax diffMax migMax rxnMax "
+                        << "advInt diffInt migInt rxnInt"
+                        << nl;
+                }
+                else
+                {
+                    transportLogPtr()
+                        << "# time species "
+                        << "advMax diffMax migMax kinMax eqMax "
+                        << "advInt diffInt migInt kinInt eqInt"
+                        << nl;
+                }
             }
 
             if (diagConservationLog)
@@ -104,11 +177,37 @@
                     new OFstream(diagDir/"conservation.dat")
                 );
 
-                conservationLogPtr()
-                    << "# time species "
-                    << "N0 Nt dN "
-                    << "flowIn flowOut reaction "
-                    << "residual relativeResidual"
+                if (diagConservationMode == "breakdown")
+                {
+                    conservationLogPtr()
+                        << "# time species N0 Nt dN "
+                        << "transport advection diffusion migration "
+                        << "reaction kinetic equilibrium "
+                        << "residual relativeResidual"
+                        << nl;
+                }
+                else
+                {
+                    conservationLogPtr()
+                        << "# time species residual relativeResidual"
+                        << nl;
+                }
+            }
+
+            if (diagElectrodeFluxStabilityLog)
+            {
+                electrodeFluxStabilityLogPtr.reset
+                (
+                    new OFstream
+                    (
+                        diagDir/"electrodeFluxStability.dat"
+                    )
+                );
+
+                electrodeFluxStabilityLogPtr()
+                    << "# time species patch "
+                    << "Bmin Bmean Bmax "
+                    << "robinSafetyMin robinSafetyMean robinSafetyMax"
                     << nl;
             }
 
@@ -126,7 +225,7 @@
                 if
                 (
                     diagChargeOutput == "molarCharge"
-                || diagChargeOutput == "both"
+                 || diagChargeOutput == "both"
                 )
                 {
                     os  << " molarMin"
@@ -138,7 +237,7 @@
                 if
                 (
                     diagChargeOutput == "chargeDensity"
-                || diagChargeOutput == "both"
+                 || diagChargeOutput == "both"
                 )
                 {
                     os  << " chargeMin"
@@ -154,37 +253,12 @@
             {
                 DebyeLogPtr.reset
                 (
-                    new OFstream
-                    (
-                        diagDir/"Debye.dat"
-                    )
+                    new OFstream(diagDir/"Debye.dat")
                 );
 
                 DebyeLogPtr()
                     << "# time maxE_D"
                     << nl;
-            }
-
-            if
-            (
-                diagSatPrintSi
-             || diagSatPrintSTot
-             || diagSatPrintPEqi
-             || diagSatPrintPEqTot
-            )
-            {
-                // print only, no file needed
-            }
-
-            if
-            (
-                diagSatWriteSi
-             || diagSatWriteSTot
-             || diagSatWritePEqi
-             || diagSatWritePEqTot
-            )
-            {
-                // fields written by AUTO_WRITE, no log needed
             }
 
             if
@@ -295,9 +369,7 @@
         Info<< endl;
     }
 
-    // ############################################################ Transport ############################################################
-
-
+    // ############################################################ Transport ############################################################ 
 
     if (diagTransportActive)
     {
@@ -337,7 +409,12 @@
 
             if (zDictPtr)
             {
-                zi = zDictPtr->getOrDefault<scalar>(specieName, 0.0);
+                zi =
+                    zDictPtr->getOrDefault<scalar>
+                    (
+                        specieName,
+                        0.0
+                    );
             }
 
             surfaceScalarField migrationFlux
@@ -393,10 +470,29 @@
                 fvc::div(migrationFlux)
             );
 
-            const scalar advMax = max(mag(advTerm)).value();
-            const scalar diffMax = max(mag(diffTerm)).value();
-            const scalar migMax = max(mag(migTerm)).value();
-            const scalar rxnMax = max(mag(Rc[i])).value();
+            tmp<volScalarField> tTotalReaction =
+                Rc[i] + Req[i];
+
+            const volScalarField& totalReaction =
+                tTotalReaction();
+
+            const scalar advMax =
+                max(mag(advTerm)).value();
+
+            const scalar diffMax =
+                max(mag(diffTerm)).value();
+
+            const scalar migMax =
+                max(mag(migTerm)).value();
+
+            const scalar kinMax =
+                max(mag(Rc[i])).value();
+
+            const scalar eqMax =
+                max(mag(Req[i])).value();
+
+            const scalar rxnMax =
+                max(mag(totalReaction)).value();
 
             const scalar advInt =
                 gSum(mag(advTerm.primitiveField())*mesh.V());
@@ -407,35 +503,77 @@
             const scalar migInt =
                 gSum(mag(migTerm.primitiveField())*mesh.V());
 
-            const scalar rxnInt =
+            const scalar kinInt =
                 gSum(mag(Rc[i].primitiveField())*mesh.V());
+
+            const scalar eqInt =
+                gSum(mag(Req[i].primitiveField())*mesh.V());
+
+            const scalar rxnInt =
+                gSum(mag(totalReaction.primitiveField())*mesh.V());
 
             if (diagTransportPrint)
             {
-                Info<< "  " << specieName
-                    << " max|adv diff mig rxn| = "
-                    << advMax << " "
-                    << diffMax << " "
-                    << migMax << " "
-                    << rxnMax
-                    << " [mol/m3/s]"
-                    << nl;
+                if (diagTransportReactionMode == "total")
+                {
+                    Info<< "  " << specieName
+                        << " max|adv diff mig rxn| = "
+                        << advMax << " "
+                        << diffMax << " "
+                        << migMax << " "
+                        << rxnMax
+                        << " [mol/m3/s]"
+                        << nl;
+                }
+                else
+                {
+                    Info<< "  " << specieName
+                        << " max|adv diff mig kin eq| = "
+                        << advMax << " "
+                        << diffMax << " "
+                        << migMax << " "
+                        << kinMax << " "
+                        << eqMax
+                        << " [mol/m3/s]"
+                        << nl;
+                }
             }
 
-            if (diagWriteTime && diagTransportLog && transportLogPtr.valid())
+            if
+            (
+                diagLogTime
+             && diagTransportLog
+             && transportLogPtr.valid()
+            )
             {
-                transportLogPtr()
-                    << runTime.value() << ' '
+                OFstream& os = transportLogPtr();
+
+                os  << runTime.value() << ' '
                     << specieName << ' '
                     << advMax << ' '
                     << diffMax << ' '
-                    << migMax << ' '
-                    << rxnMax << ' '
-                    << advInt << ' '
-                    << diffInt << ' '
-                    << migInt << ' '
-                    << rxnInt
-                    << nl;
+                    << migMax << ' ';
+
+                if (diagTransportReactionMode == "total")
+                {
+                    os  << rxnMax << ' '
+                        << advInt << ' '
+                        << diffInt << ' '
+                        << migInt << ' '
+                        << rxnInt;
+                }
+                else
+                {
+                    os  << kinMax << ' '
+                        << eqMax << ' '
+                        << advInt << ' '
+                        << diffInt << ' '
+                        << migInt << ' '
+                        << kinInt << ' '
+                        << eqInt;
+                }
+
+                os << nl;
             }
         }
 
@@ -475,12 +613,19 @@
 
             if (zDictPtr)
             {
-                zi = zDictPtr->getOrDefault<scalar>(specieName, 0.0);
+                zi =
+                    zDictPtr->getOrDefault<scalar>
+                    (
+                        specieName,
+                        0.0
+                    );
             }
 
-            scalar flowInRate = 0.0;
-            scalar flowOutRate = 0.0;
-            scalar electrodeGenRate = 0.0;
+            // Outward boundary rates [mol/s].  These are converted below
+            // into signed additions to the domain by changing their sign.
+            scalar advOutRate = 0.0;
+            scalar diffOutRate = 0.0;
+            scalar migOutRate = 0.0;
 
             forAll(mesh.boundary(), patchi)
             {
@@ -512,99 +657,104 @@
                 const fvsPatchVectorField& Sfp =
                     mesh.Sf().boundaryField()[patchi];
 
-                scalar patchFlowIn = 0.0;
-                scalar patchFlowOut = 0.0;
-                scalar patchElectrodeGen = 0.0;
-
                 forAll(cp, facei)
                 {
-                    const scalar adv =
+                    // Positive values are outward from the domain.
+                    advOutRate +=
                         cp[facei]*phip[facei];
 
-                    const scalar diff =
+                    diffOutRate +=
                        -Di.value()
                        *snGradCp[facei]
                        *magSfp[facei];
 
-                    const scalar mig =
+                    migOutRate +=
                        -Di.value()
                        *zi
                        *Fdim.value()
                        /(Rgas.value()*T.value())
                        *cp[facei]
                        *(gradPhiEp[facei] & Sfp[facei]);
-
-                    const scalar flow = adv + diff + mig;
-
-                    patchFlowOut += max(flow, 0.0);
-                    patchFlowIn  += max(-flow, 0.0);
-
-                    if (conservationPatchRole[patchi] == 2)
-                    {
-                        // Generation into domain from non-advective flux:
-                        // inward diff+mig is positive generation.
-                        const scalar nonAdvectiveOut = diff + mig;
-                        patchElectrodeGen += -nonAdvectiveOut;
-                    }
-                }
-
-                if (conservationPatchRole[patchi] == 1)
-                {
-                    flowInRate  += patchFlowIn;
-                    flowOutRate += patchFlowOut;
-                }
-                else if (conservationPatchRole[patchi] == 2)
-                {
-                    electrodeGenRate += patchElectrodeGen;
                 }
             }
 
-            reduce(flowInRate, sumOp<scalar>());
-            reduce(flowOutRate, sumOp<scalar>());
-            reduce(electrodeGenRate, sumOp<scalar>());
+            reduce(advOutRate, sumOp<scalar>());
+            reduce(diffOutRate, sumOp<scalar>());
+            reduce(migOutRate, sumOp<scalar>());
 
-            const scalar reactionRate =
+            // Positive cumulative transport means net addition to the domain.
+            cumulativeAdvection[i] += -advOutRate*dt;
+            cumulativeDiffusion[i] += -diffOutRate*dt;
+            cumulativeMigration[i] += -migOutRate*dt;
+
+            const scalar kineticRate =
                 gSum(Rc[i].primitiveField()*mesh.V());
 
-            const scalar totalGenerationRate =
-                reactionRate + electrodeGenRate;
+            const scalar equilibriumRate =
+                gSum(Req[i].primitiveField()*mesh.V());
 
-            cumulativeFlowIn[i] += flowInRate*dt;
-            cumulativeFlowOut[i] += flowOutRate*dt;
-            cumulativeReaction[i] += totalGenerationRate*dt;
+            cumulativeKinetic[i] += kineticRate*dt;
+            cumulativeEquilibrium[i] += equilibriumRate*dt;
 
             const scalar Nt =
                 gSum(ci.primitiveField()*mesh.V());
 
             const scalar dN = Nt - N0[i];
 
+            const scalar transport =
+                cumulativeAdvection[i]
+              + cumulativeDiffusion[i]
+              + cumulativeMigration[i];
+
+            const scalar reaction =
+                cumulativeKinetic[i]
+              + cumulativeEquilibrium[i];
+
             const scalar residual =
-                dN
-              + cumulativeFlowOut[i]
-              - cumulativeFlowIn[i]
-              - cumulativeReaction[i];
+                dN - transport - reaction;
 
             const scalar scale =
                 max
                 (
-                    max(mag(dN), mag(cumulativeReaction[i])),
-                    max(mag(cumulativeFlowIn[i]), mag(cumulativeFlowOut[i]))
+                    max
+                    (
+                        max(mag(dN), mag(cumulativeAdvection[i])),
+                        max
+                        (
+                            mag(cumulativeDiffusion[i]),
+                            mag(cumulativeMigration[i])
+                        )
+                    ),
+                    max
+                    (
+                        mag(cumulativeKinetic[i]),
+                        mag(cumulativeEquilibrium[i])
+                    )
                 );
 
-            const scalar relativeResidual = residual/(scale + SMALL);
+            const scalar relativeResidual =
+                residual/(scale + SMALL);
 
             if (diagConservationPrint)
             {
-                if (diagConservationMode == "full")
+                if (diagConservationMode == "breakdown")
                 {
-                    Info<< "  " << specieName
-                        << " dN=" << dN
-                        << " flowIn=" << cumulativeFlowIn[i]
-                        << " flowOut=" << cumulativeFlowOut[i]
-                        << " generation=" << cumulativeReaction[i]
-                        << " residual=" << residual
-                        << " rel=" << relativeResidual
-                        << nl;
+                    Info<< "  " << specieName << nl
+                        << "    dN          = " << dN << " mol" << nl
+                        << "    transport   = " << transport << " mol" << nl
+                        << "      advection = "
+                        << cumulativeAdvection[i] << " mol" << nl
+                        << "      diffusion = "
+                        << cumulativeDiffusion[i] << " mol" << nl
+                        << "      migration = "
+                        << cumulativeMigration[i] << " mol" << nl
+                        << "    reaction    = " << reaction << " mol" << nl
+                        << "      kinetic   = "
+                        << cumulativeKinetic[i] << " mol" << nl
+                        << "      equilibrium = "
+                        << cumulativeEquilibrium[i] << " mol" << nl
+                        << "    residual    = " << residual << " mol" << nl
+                        << "    rel         = " << relativeResidual << nl;
                 }
                 else
                 {
@@ -615,20 +765,29 @@
                 }
             }
 
-            if (diagWriteTime && diagConservationLog && conservationLogPtr.valid())
+            if
+            (
+                diagLogTime
+             && diagConservationLog
+             && conservationLogPtr.valid()
+            )
             {
                 OFstream& os = conservationLogPtr();
 
-                if (diagConservationMode == "full")
+                if (diagConservationMode == "breakdown")
                 {
                     os  << runTime.value() << ' '
                         << specieName << ' '
                         << N0[i] << ' '
                         << Nt << ' '
                         << dN << ' '
-                        << cumulativeFlowIn[i] << ' '
-                        << cumulativeFlowOut[i] << ' '
-                        << cumulativeReaction[i] << ' '
+                        << transport << ' '
+                        << cumulativeAdvection[i] << ' '
+                        << cumulativeDiffusion[i] << ' '
+                        << cumulativeMigration[i] << ' '
+                        << reaction << ' '
+                        << cumulativeKinetic[i] << ' '
+                        << cumulativeEquilibrium[i] << ' '
                         << residual << ' '
                         << relativeResidual
                         << nl;
@@ -645,6 +804,148 @@
         }
 
         if (diagConservationPrint)
+        {
+            Info<< endl;
+        }
+    }
+
+// ############################################################ Electrode flux stability ############################################################
+
+    if (diagElectrodeFluxStabilityActive)
+    {
+        if (diagElectrodeFluxStabilityPrint)
+        {
+            Info<< "Electrode flux stability diagnostics:" << nl;
+        }
+
+        forAll(c, i)
+        {
+            scalar zi = 0.0;
+
+            if (zDictPtr)
+            {
+                zi =
+                    zDictPtr->getOrDefault<scalar>
+                    (
+                        species[i],
+                        0.0
+                    );
+            }
+
+            if (mag(zi) <= SMALL)
+            {
+                continue;
+            }
+
+            const volScalarField& ci = c[i];
+
+            forAll(mesh.boundary(), patchi)
+            {
+                if (conservationPatchRole[patchi] != 2)
+                {
+                    continue;
+                }
+
+                const fvPatchScalarField& cp =
+                    ci.boundaryField()[patchi];
+
+                // This diagnostic describes the Robin migration coupling,
+                // so only report species that actually use robinMolarFlux on
+                // the configured electrode patch.
+                if (cp.type() != "robinMolarFlux")
+                {
+                    continue;
+                }
+
+                const fvPatch& patch = mesh.boundary()[patchi];
+
+                if (!patch.size())
+                {
+                    continue;
+                }
+
+                const scalarField& delta =
+                    patch.deltaCoeffs();
+
+                const vectorField nf(patch.nf());
+
+                const fvPatchVectorField& gradPhiEp =
+                    gradPhiE.boundaryField()[patchi];
+
+                scalarField B(patch.size(), 0.0);
+                scalarField robinSafety(patch.size(), 0.0);
+
+                forAll(B, facei)
+                {
+                    const scalar normalGradPhiE =
+                        gradPhiEp[facei] & nf[facei];
+
+                    const scalar beta =
+                        zi
+                       *Fdim.value()
+                       /(Rgas.value()*T.value())
+                       *normalGradPhiE;
+
+                    B[facei] =
+                        mag(beta/delta[facei]);
+
+                    robinSafety[facei] =
+                        mag((delta[facei] + beta)/delta[facei]);
+                }
+
+                const fvsPatchScalarField& magSf =
+                    mesh.magSf().boundaryField()[patchi];
+
+                const scalar patchArea = gSum(magSf);
+
+                const scalar BMin = gMin(B);
+                const scalar BMax = gMax(B);
+                const scalar BMean =
+                    gSum(B*magSf)/(patchArea + VSMALL);
+
+                const scalar safetyMin = gMin(robinSafety);
+                const scalar safetyMax = gMax(robinSafety);
+                const scalar safetyMean =
+                    gSum(robinSafety*magSf)/(patchArea + VSMALL);
+
+                if (diagElectrodeFluxStabilityPrint)
+                {
+                    Info<< "  " << ci.name()
+                        << " patch " << patch.name() << nl
+                        << "    B=|beta/delta| min/mean/max = "
+                        << BMin << " / "
+                        << BMean << " / "
+                        << BMax << nl
+                        << "    Robin safety |delta+beta|/delta "
+                        << "min/mean/max = "
+                        << safetyMin << " / "
+                        << safetyMean << " / "
+                        << safetyMax << nl;
+                }
+
+                if
+                (
+                    diagLogTime
+                 && diagElectrodeFluxStabilityLog
+                 && electrodeFluxStabilityLogPtr.valid()
+                )
+                {
+                    electrodeFluxStabilityLogPtr()
+                        << runTime.value() << ' '
+                        << species[i] << ' '
+                        << patch.name() << ' '
+                        << BMin << ' '
+                        << BMean << ' '
+                        << BMax << ' '
+                        << safetyMin << ' '
+                        << safetyMean << ' '
+                        << safetyMax
+                        << nl;
+                }
+            }
+        }
+
+        if (diagElectrodeFluxStabilityPrint)
         {
             Info<< endl;
         }
@@ -757,7 +1058,7 @@
             Info<< endl;
         }
 
-        if (diagWriteTime && diagChargeLog && chargeLogPtr.valid())
+        if (diagLogTime && diagChargeLog && chargeLogPtr.valid())
         {
             OFstream& os = chargeLogPtr();
 
@@ -942,7 +1243,7 @@ if (diagDebyeActive)
             << endl;
     }
 
-    if (diagWriteTime && diagDebyeLog && DebyeLogPtr.valid())
+    if (diagLogTime && diagDebyeLog && DebyeLogPtr.valid())
     {
         DebyeLogPtr()
             << runTime.value() << ' '
@@ -1033,7 +1334,7 @@ if (diagDebyeActive)
             }
 
             // No collective operations inside this master-only block.
-            if (diagWriteTime && saturationLogPtr.valid())
+            if (diagLogTime && saturationLogPtr.valid())
             {
                 saturationLogPtr()
                     << runTime.value() << ' '
