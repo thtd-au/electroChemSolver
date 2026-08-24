@@ -117,7 +117,7 @@ forAll(c, i)
                 gMax(ci.primitiveField());
         }
 
-        ci.max(0.0);
+        // ci.max(0.0);
         ci.correctBoundaryConditions();
     }
 }
@@ -137,6 +137,44 @@ forAll(c, i)
             0.0
         );
 }
+
+// Store the water-equilibrium invariant before projection.
+// Only allocate/populate this when the diagnostic is requested and a waterEquilibrium model actually exists.
+List<scalarField> waterAPreclip;
+
+if(diagWaterEquilibriumA  && reactionMgr.hasWaterEquilibrium())
+{
+    waterAPreclip.setSize
+    (
+        reactionMgr.nWaterEquilibriumReactions()
+    );
+
+    for
+    (
+        label reactioni = 0;
+        reactioni < reactionMgr.nWaterEquilibriumReactions();
+        ++reactioni
+    )
+    {
+        const waterEquilibrium& waterEq =
+            reactionMgr.waterEquilibriumReaction(reactioni);
+
+        const volScalarField& cH =
+            mesh.lookupObject<volScalarField>
+            (
+                "c_" + waterEq.HplusName()
+            );
+
+        const volScalarField& cOH =
+            mesh.lookupObject<volScalarField>
+            (
+                "c_" + waterEq.OHminusName()
+            );
+
+        waterAPreclip[reactioni] = cH.primitiveField()- cOH.primitiveField();
+    }
+}
+
 
 // Apply all fast equilibrium projections only after all species transport solves.
 reactionMgr.applyEquilibriumReactions();
@@ -159,6 +197,15 @@ forAll(c, i)
     }
 }
 
+// Positivity enforcement only AFTER equilibrium projection.
+forAll(c, i)
+{
+    if (i != inertIndex)
+    {
+        c[i].max(0.0);
+        c[i].correctBoundaryConditions();
+    }
+}
 
 if (pHActive)
 {

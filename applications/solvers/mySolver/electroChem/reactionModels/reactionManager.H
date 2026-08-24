@@ -59,6 +59,25 @@ public:
     {
         return equilibriumReactions_.size();
     }
+
+    // Accessors for waterEquilibrium diagnostics  
+    bool hasWaterEquilibrium() const
+    {
+        return !equilibriumReactions_.empty();
+    }
+
+    label nWaterEquilibriumReactions() const
+    {
+        return equilibriumReactions_.size();
+    }
+
+    const waterEquilibrium& waterEquilibriumReaction
+    (
+        const label reactioni
+    ) const
+    {
+        return equilibriumReactions_[reactioni];
+    }
 };
 
 } // End namespace Foam

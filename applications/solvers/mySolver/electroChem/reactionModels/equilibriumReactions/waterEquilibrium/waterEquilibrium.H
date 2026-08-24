@@ -33,6 +33,22 @@ public:
     );
 
     void apply();
+
+    const word& name() const
+    {
+        return name_;
+    }
+
+    const word& HplusName() const
+    {
+        return HplusName_;
+    }
+
+    const word& OHminusName() const
+    {
+        return OHminusName_;
+    }
+    
 };
 
 } // End namespace Foam

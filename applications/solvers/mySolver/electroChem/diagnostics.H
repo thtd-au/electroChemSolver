@@ -1419,5 +1419,59 @@ if (diagDebyeActive)
             << maxNonInertExcess << nl
             << endl;
     }
+
+// ############################################################ Water equilibrium ############################################################
+
+if
+(
+    diagWaterEquilibriumA
+ && reactionMgr.hasWaterEquilibrium()
+)
+{
+    Info<< "Water equilibrium diagnostics:" << nl;
+
+    for
+    (
+        label reactioni = 0;
+        reactioni < reactionMgr.nWaterEquilibriumReactions();
+        ++reactioni
+    )
+    {
+        const waterEquilibrium& waterEq =
+            reactionMgr.waterEquilibriumReaction(reactioni);
+
+        const volScalarField& cH =
+            mesh.lookupObject<volScalarField>
+            (
+                "c_" + waterEq.HplusName()
+            );
+
+        const volScalarField& cOH =
+            mesh.lookupObject<volScalarField>
+            (
+                "c_" + waterEq.OHminusName()
+            );
+
+        const scalarField AAfter =
+            cH.primitiveField()
+          - cOH.primitiveField();
+
+        const scalarField AResidual =
+            waterAPreclip[reactioni]
+          - AAfter;
+
+        const scalar maxAbsAResidual =
+            gMax(mag(AResidual));
+
+        Info<< "  " << waterEq.name() << nl
+            << "    max|A_pre - A_after| = "
+            << maxAbsAResidual
+            << " mol/m3"
+            << nl;
+    }
+
+    Info<< endl;
+}
+
 }
 
