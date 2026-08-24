@@ -125,13 +125,28 @@ forAll(c, i)
             cMaxBeforeClipping[i] =
                 gMax(ci.primitiveField());
         }
-
-        ci.max(0.0);
+        
+        // Do not clip here. Equilibrium reactions must see the raw transported
+        // concentrations so deficits (negative values) are retained in their
+        // conserved quantities, e.g. A = [H+] - [OH-].
+        // ci.max(0.0);
         ci.correctBoundaryConditions();
     }
 }
 // Apply all fast equilibrium projections only after all species transport solves.
 reactionMgr.applyEquilibriumReactions();
+
+// Clip only after the equilibrium projection has had a chance to account for
+// any local species deficit. Equilibrium species should already be positive;
+// this also retains the existing non-negative safeguard for all other species.
+forAll(c, i)
+{
+    if (i != inertIndex)
+    {
+        c[i].max(0.0);
+        c[i].correctBoundaryConditions();
+    }
+}
 
 if (pHActive)
 {

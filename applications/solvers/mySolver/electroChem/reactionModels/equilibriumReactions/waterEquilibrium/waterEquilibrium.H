@@ -3,6 +3,7 @@
 
 #include "fvMesh.H"
 #include "dictionary.H"
+#include "Switch.H"
 #include "volFields.H"
 
 namespace Foam
@@ -19,6 +20,7 @@ private:
     word OHminusName_;
 
     scalar Kw_;
+    Switch diagA_;
 
     volScalarField& Hplus_;
     volScalarField& OHminus_;
