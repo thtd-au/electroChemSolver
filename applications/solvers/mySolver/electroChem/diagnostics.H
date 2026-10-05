@@ -428,7 +428,8 @@
                     IOobject::NO_WRITE
                 ),
                 fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)
-              * (fvc::interpolate(gradPhiE) & mesh.Sf())
+                * fvc::snGrad(phiE)
+                * mesh.magSf()
             );
 
             volScalarField advTerm
@@ -639,23 +640,16 @@
                     continue;
                 }
 
-                const fvPatchScalarField& cp =
-                    ci.boundaryField()[patchi];
-
-                const fvsPatchScalarField& phip =
-                    phi.boundaryField()[patchi];
-
-                const fvsPatchScalarField& magSfp =
-                    mesh.magSf().boundaryField()[patchi];
-
+                const fvPatchScalarField& cp = ci.boundaryField()[patchi];
+                const fvsPatchScalarField& phip = phi.boundaryField()[patchi];
+                const fvsPatchScalarField& magSfp = mesh.magSf().boundaryField()[patchi];
                 tmp<scalarField> tsnGradCp = cp.snGrad();
                 const scalarField& snGradCp = tsnGradCp();
-
-                const fvPatchVectorField& gradPhiEp =
-                    gradPhiE.boundaryField()[patchi];
-
-                const fvsPatchVectorField& Sfp =
-                    mesh.Sf().boundaryField()[patchi];
+                // const fvPatchVectorField& gradPhiEp = gradPhiE.boundaryField()[patchi];
+                // const fvsPatchVectorField& Sfp = mesh.Sf().boundaryField()[patchi];
+                const fvPatchScalarField& phiEp = phiE.boundaryField()[patchi];
+                tmp<scalarField> tsnGradPhiEp = phiEp.snGrad();
+                const scalarField& snGradPhiEp = tsnGradPhiEp();
 
                 forAll(cp, facei)
                 {
@@ -674,7 +668,8 @@
                        *Fdim.value()
                        /(Rgas.value()*T.value())
                        *cp[facei]
-                       *(gradPhiEp[facei] & Sfp[facei]);
+                       *snGradPhiEp[facei]
+                       *magSfp[facei];
                 }
             }
 
@@ -687,11 +682,8 @@
             cumulativeDiffusion[i] += -diffOutRate*dt;
             cumulativeMigration[i] += -migOutRate*dt;
 
-            const scalar kineticRate =
-                gSum(Rc[i].primitiveField()*mesh.V());
-
-            const scalar equilibriumRate =
-                gSum(Req[i].primitiveField()*mesh.V());
+            const scalar kineticRate = gSum(Rc[i].primitiveField()*mesh.V());
+            const scalar equilibriumRate = gSum(Req[i].primitiveField()*mesh.V());
 
             cumulativeKinetic[i] += kineticRate*dt;
             cumulativeEquilibrium[i] += equilibriumRate*dt;
@@ -850,9 +842,9 @@
                     ci.boundaryField()[patchi];
 
                 // This diagnostic describes the Robin migration coupling,
-                // so only report species that actually use robinMolarFlux on
+                // so only report species that actually use galvanostaticMolarFlux on
                 // the configured electrode patch.
-                if (cp.type() != "robinMolarFlux")
+                if (cp.type() != "galvanostaticMolarFlux")
                 {
                     continue;
                 }
@@ -864,21 +856,19 @@
                     continue;
                 }
 
-                const scalarField& delta =
-                    patch.deltaCoeffs();
+                const scalarField& delta = patch.deltaCoeffs();
 
-                const vectorField nf(patch.nf());
+                const fvPatchScalarField& phiEp = phiE.boundaryField()[patchi];
 
-                const fvPatchVectorField& gradPhiEp =
-                    gradPhiE.boundaryField()[patchi];
+                tmp<scalarField> tsnGradPhiEp = phiEp.snGrad();
+                const scalarField& snGradPhiEp = tsnGradPhiEp();
 
                 scalarField B(patch.size(), 0.0);
                 scalarField robinSafety(patch.size(), 0.0);
 
                 forAll(B, facei)
                 {
-                    const scalar normalGradPhiE =
-                        gradPhiEp[facei] & nf[facei];
+                    const scalar normalGradPhiE = snGradPhiEp[facei];
 
                     const scalar beta =
                         zi
@@ -886,11 +876,9 @@
                        /(Rgas.value()*T.value())
                        *normalGradPhiE;
 
-                    B[facei] =
-                        mag(beta/delta[facei]);
+                    B[facei] = mag(beta/delta[facei]);
 
-                    robinSafety[facei] =
-                        mag((delta[facei] + beta)/delta[facei]);
+                    robinSafety[facei] = mag((delta[facei] + beta)/delta[facei]);
                 }
 
                 const fvsPatchScalarField& magSf =

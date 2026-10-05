@@ -1,5 +1,5 @@
-derivedFvPatchFields/MolarFlux/faradaicMolarFlux.C
-derivedFvPatchFields/MolarFlux/robinMolarFlux.C
+derivedFvPatchFields/MolarFlux/galvanostaticMolarFlux.C
+derivedFvPatchFields/PotentialFlux/galvanostaticPotentialFlux.C
 derivedFvPatchFields/MolarConcentration/inertMolarConcentration.C
 derivedFvPatchFields/MolarConcentration/pHMolarConcentration.C
 
