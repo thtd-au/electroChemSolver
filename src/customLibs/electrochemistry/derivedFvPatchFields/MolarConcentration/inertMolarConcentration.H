@@ -1,51 +1,48 @@
-#ifndef faradaicMolarFlux_H
-#define faradaicMolarFlux_H
+#ifndef inertMolarConcentration_H
+#define inertMolarConcentration_H
 
-#include "fixedGradientFvPatchFields.H"
+#include "fixedValueFvPatchFields.H"
 
 namespace Foam
 {
 
-class faradaicMolarFlux
+class inertMolarConcentration
 :
-    public fixedGradientFvPatchScalarField
+    public fixedValueFvPatchScalarField
 {
-    scalar stoichCoeff_;
-    scalar nElectrons_;
-
 public:
 
-    TypeName("faradaicMolarFlux");
+    TypeName("inertMolarConcentration");
 
-    faradaicMolarFlux
+    inertMolarConcentration
     (
         const fvPatch&,
         const DimensionedField<scalar, volMesh>&
     );
 
-    faradaicMolarFlux
+    inertMolarConcentration
     (
-        const faradaicMolarFlux&,
+        const inertMolarConcentration&,
         const fvPatch&,
         const DimensionedField<scalar, volMesh>&,
         const fvPatchFieldMapper&
     );
 
-    faradaicMolarFlux
+    inertMolarConcentration
     (
         const fvPatch&,
         const DimensionedField<scalar, volMesh>&,
         const dictionary&
     );
 
-    faradaicMolarFlux
+    inertMolarConcentration
     (
-        const faradaicMolarFlux&
+        const inertMolarConcentration&
     );
 
-    faradaicMolarFlux
+    inertMolarConcentration
     (
-        const faradaicMolarFlux&,
+        const inertMolarConcentration&,
         const DimensionedField<scalar, volMesh>&
     );
 
@@ -53,7 +50,7 @@ public:
     {
         return tmp<fvPatchScalarField>
         (
-            new faradaicMolarFlux(*this)
+            new inertMolarConcentration(*this)
         );
     }
 
@@ -64,7 +61,7 @@ public:
     {
         return tmp<fvPatchScalarField>
         (
-            new faradaicMolarFlux(*this, iF)
+            new inertMolarConcentration(*this, iF)
         );
     }
 
@@ -73,7 +70,7 @@ public:
     virtual void write(Ostream&) const;
 };
 
-}
+} // End namespace Foam
 
 #endif
 
