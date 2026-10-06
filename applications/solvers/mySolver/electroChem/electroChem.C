@@ -8,6 +8,7 @@
 #include "localEulerDdtScheme.H"
 #include "fvcSmooth.H"
 #include "reactionManager.H"
+#include "potentialManager.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -31,12 +32,6 @@ int main(int argc, char *argv[])
     #include "createUfIfPresent.H"
     #include "CourantNo.H"
     #include "setInitialDeltaT.H"
-
-    reactionManager reactionMgr(mesh, reactions);
-    // Establish instantaneous equilibria before calculating initial conductivity
-    reactionMgr.applyEquilibriumReactions();
-    // initilize potential gradient for first iteration 
-    #include "phiEqn.H" 
 
     turbulence->validate();
 
@@ -114,11 +109,97 @@ int main(int argc, char *argv[])
             }
         }
 
-        // electroChem.C time loop
-        #include "cEqn.H"
-        #include "phiEqn.H"
+        // --- Coupled electrochemical Picard loop
+        const dictionary& picardDict = mesh.solutionDict().subDict("Picard");
+        const label maxPicardIter = picardDict.get<label>("maxIter");
+
+        if (maxPicardIter <= 0)
+        {
+            FatalIOErrorInFunction(picardDict)
+                << "Picard/maxIter must be positive, found "
+                << maxPicardIter
+                << exit(FatalIOError);
+        }
+
+        // Fast-equilibrium pseudo-sources are timestep-local iterative state.
+        // phiE is deliberately NOT reset: it starts from the previously
+        // converged physical-time value read/retained by the solver.
+        reactionMgr.resetEquilibriumSources();
+
+        bool electroChemConverged = false;
+        label testedPicardStates = 0;
+
+        for (label picardI = 0; picardI < maxPicardIter; ++picardI)
+        {
+            testedPicardStates = picardI + 1;
+
+            Info<< "Electrochemical Picard state " << testedPicardStates
+                << '/' << maxPicardIter << nl;
+
+            // One common kinetic state for the complete species sweep.
+            reactionMgr.updateKineticRates();
+
+            // Transport all active species using the current lambda and phiE.
+            // cEqn also supplies S_i = V/aP_i to reactionMgr.
+            #include "cEqn.H"
+
+            // Both constraints are evaluated on this SAME transported state.
+            reactionMgr.evaluateEquilibrium();
+            potentialMgr.evaluateConstraint();
+
+            const bool equilibriumOK = reactionMgr.equilibriumConverged();
+            const bool electroneutralityOK = potentialMgr.converged();
+
+            reactionMgr.reportEquilibrium();
+            potentialMgr.report();
+
+            if (equilibriumOK && electroneutralityOK)
+            {
+                electroChemConverged = true;
+                break;
+            }
+
+            // maxIter counts transported-and-tested states.  Never calculate
+            // a correction after the final state because its physical effect
+            // could not be transported and tested in this timestep.
+            if (picardI == maxPicardIter - 1)
+            {
+                break;
+            }
+
+            if (!equilibriumOK)
+            {
+                reactionMgr.correctEquilibrium();
+            }
+
+            if (!electroneutralityOK)
+            {
+                potentialMgr.correct();
+            }
+
+            // Any lambda/phiE correction is intentionally followed by the
+            // next complete cEqn transport before either constraint is tested.
+        }
+
+        if (!electroChemConverged)
+        {
+            Info<< nl
+                << "Final electrochemical constraint state after "
+                << testedPicardStates << " transported states:" << nl;
+            reactionMgr.reportEquilibrium();
+            potentialMgr.report();
+
+            FatalErrorInFunction
+                << "Electrochemical Picard loop failed to converge after "
+                << testedPicardStates << " transported-and-tested states at time "
+                << runTime.timeName() << nl
+                << "No untested final lambda or phiE correction was applied."
+                << exit(FatalError);
+        }
+
+        // Post-convergence closure and diagnostics operate only on an accepted
+        // electrochemical state.
         #include "YEqn.H"
-        
         #include "diagnostics.H"
 
         runTime.write();
@@ -133,3 +214,4 @@ int main(int argc, char *argv[])
 
 
 // ************************************************************************* //
+

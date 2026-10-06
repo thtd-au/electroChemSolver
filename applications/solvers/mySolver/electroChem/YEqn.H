@@ -1,4 +1,11 @@
-// YEqn.H
+// YEqn.H -- post-convergence mass-fraction/inert closure
+//
+// Concentrations are the primary electrochemical state.  This file derives
+// mass fractions only after joint Picard convergence and reconstructs the
+// neutral inert concentration from the remaining mass fraction.  No clipping
+// is permitted: an invalid closure is reported instead of silently changing
+// the accepted electrochemical state.
+
 volScalarField Yt
 (
     IOobject
@@ -25,8 +32,17 @@ forAll(Y, i)
     if (i != inertIndex)
     {
         Y[i] = c[i]*Mi/rho;
-        Y[i].max(0.0);
         Y[i].correctBoundaryConditions();
+
+        const scalar minYi = gMin(Y[i].primitiveField());
+        if (minYi < 0.0)
+        {
+            FatalErrorInFunction
+                << "Negative derived mass fraction for " << species[i]
+                << ": min(Y)=" << minYi << nl
+                << "PotentialReaction does not clip derived mass fractions."
+                << exit(FatalError);
+        }
 
         Yt += Y[i];
     }
@@ -35,11 +51,21 @@ forAll(Y, i)
 if (inertIndex >= 0)
 {
     Y[inertIndex] = scalar(1) - Yt;
-    Y[inertIndex].max(0.0);
     Y[inertIndex].correctBoundaryConditions();
+
+    const scalar minYInert = gMin(Y[inertIndex].primitiveField());
+    if (minYInert < 0.0)
+    {
+        FatalErrorInFunction
+            << "Inert mass-fraction closure is negative for "
+            << species[inertIndex] << ": min(Y_inert)=" << minYInert << nl
+            << "The non-inert mass fractions exceed unity; the state will not "
+            << "be clipped or renormalized."
+            << exit(FatalError);
+    }
 }
 
-// reconstruct inert concentration field
+// Reconstruct the inert concentration from the accepted mass-fraction closure.
 dimensionedScalar Minert
 (
     "M_" + species[inertIndex],
@@ -48,6 +74,5 @@ dimensionedScalar Minert
 );
 
 c[inertIndex] = rho*Y[inertIndex]/Minert;
-
 c[inertIndex].correctBoundaryConditions();
 

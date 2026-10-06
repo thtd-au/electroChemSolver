@@ -182,12 +182,10 @@ if (controlDict.found("species"))
 
 // Potential controls
 Switch printPhiE(false);
-Switch printGradPhiE(false);
 Switch printKappa(false);
 Switch printJDiff(false);
 
 Switch writePhiE(false);
-Switch writeGradPhiE(false);
 Switch writeKappa(false);
 Switch writeJDiff(false);
 
@@ -201,7 +199,6 @@ if (controlDict.found("potential"))
         const dictionary& d = potentialControlDict.subDict("print");
 
         printPhiE     = d.getOrDefault<Switch>("phiE", false);
-        printGradPhiE = d.getOrDefault<Switch>("gradPhiE", false);
         printKappa    = d.getOrDefault<Switch>("kappa", false);
         printJDiff    = d.getOrDefault<Switch>("jDiff", false);
     }
@@ -211,7 +208,6 @@ if (controlDict.found("potential"))
         const dictionary& d = potentialControlDict.subDict("write");
 
         writePhiE     = d.getOrDefault<Switch>("phiE", false);
-        writeGradPhiE = d.getOrDefault<Switch>("gradPhiE", false);
         writeKappa    = d.getOrDefault<Switch>("kappa", false);
         writeJDiff    = d.getOrDefault<Switch>("jDiff", false);
     }
@@ -244,7 +240,7 @@ scalar diagLogInterval(1.0);
 Switch diagTransportPrint(false);
 Switch diagTransportLog(false);
 wordList diagTransportSpecies(0);
-word diagTransportReactionMode("total"); // total | split
+word diagTransportReactionMode("total"); // PotentialReaction diagnostics use total source
 
 Switch diagConservationPrint(false);
 Switch diagConservationLog(false);
@@ -303,15 +299,12 @@ if (controlDict.found("diagnostics"))
         diagTransportReactionMode =
             d.getOrDefault<word>("reactionMode", word("total"));
 
-        if
-        (
-            diagTransportReactionMode != "total"
-         && diagTransportReactionMode != "split"
-        )
+        if (diagTransportReactionMode != "total")
         {
             FatalIOErrorInFunction(d)
-                << "diagnostics/transport/reactionMode must be "
-                << "total or split"
+                << "diagnostics/transport/reactionMode must be total. "
+                << "PotentialReaction does not infer a kinetic/equilibrium "
+                << "split from the accepted transported state."
                 << exit(FatalIOError);
         }
 
@@ -573,7 +566,6 @@ if (reactions.found("chargeNumber"))
 PtrList<volScalarField> c(species.size());
 PtrList<volScalarField> Y(species.size());
 PtrList<volScalarField> Rc(species.size());
-PtrList<volScalarField> Req(species.size());
 
 
 forAll(species, i)
@@ -646,27 +638,13 @@ forAll(species, i)
         )
     );
 
-    Req.set
-    (
-        i,
-        new volScalarField
-        (
-            IOobject
-            (
-                "Req_" + specieName,
-                runTime.timeName(),
-                mesh,
-                IOobject::NO_READ,
-                writeSourceFields
-                ? IOobject::AUTO_WRITE
-                : IOobject::NO_WRITE
-            ),
-            mesh,
-            dimensionedScalar("zero", dimMoles/dimVolume/dimTime, 0.0)
-        )
-    );
 
 }
+// Reaction chemistry is constructed only after all concentration fields exist.
+// reactionManager owns reaction definitions/stoichiometry/model instances, while
+// the physical concentration fields remain owned by createFields/the solver.
+reactionManager reactionMgr(mesh, reactions, species, c, inertIndex);
+
 // Initial species inventories used by conservation diagnostics.
 // Store these before the first time step so the conservation balance
 // is anchored to the actual case initial condition.
@@ -725,7 +703,7 @@ if (pHActive)
 }
 
 //
-// ############################################ simple-current potential ############################################
+// ############################################ PotentialReaction potential ############################################
 //
 
 if (!electroChemistry.found("potential"))
@@ -735,154 +713,7 @@ if (!electroChemistry.found("potential"))
         << exit(FatalIOError);
 }
 
-const dictionary& potentialDict =
-    electroChemistry.subDict("potential");
-
-word potentialModel
-(
-    potentialDict.getOrDefault<word>("model", word("simpleCurrent"))
-);
-
-if (potentialModel != "simpleCurrent")
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "Unsupported potential model " << potentialModel << nl
-        << "Currently supported model: simpleCurrent"
-        << exit(FatalIOError);
-}
-
-dimensionedScalar jApplied
-(
-    "appliedCurrentDensity",
-    dimCurrentDensity,
-    potentialDict.get<scalar>("appliedCurrentDensity")
-);
-
-vector electrodeNormal
-(
-    potentialDict.get<vector>("electrodeNormal")
-);
-
-const scalar electrodeNormalMag = mag(electrodeNormal);
-
-if (electrodeNormalMag <= SMALL)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "electrodeNormal must be non-zero"
-        << exit(FatalIOError);
-}
-
-electrodeNormal /= electrodeNormalMag;
-
-label potentialDirection = 0;
-scalar largestNormalComponent = mag(electrodeNormal[0]);
-
-for (label dir = 1; dir < vector::nComponents; ++dir)
-{
-    if (mag(electrodeNormal[dir]) > largestNormalComponent)
-    {
-        potentialDirection = dir;
-        largestNormalComponent = mag(electrodeNormal[dir]);
-    }
-}
-
-vector alignedNormal(vector::zero);
-alignedNormal[potentialDirection] =
-    electrodeNormal[potentialDirection] >= 0.0 ? 1.0 : -1.0;
-
-const scalar directionTolerance = 1e-8;
-
-if (mag(electrodeNormal - alignedNormal) > directionTolerance)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "simpleCurrent currently requires electrodeNormal to be "
-        << "aligned with a Cartesian mesh direction." << nl
-        << "Specified electrodeNormal = " << electrodeNormal
-        << exit(FatalIOError);
-}
-
-electrodeNormal = alignedNormal;
-
-word phiEReferencePatchName
-(
-    potentialDict.get<word>("referencePatch")
-);
-
-label phiEReferencePatch =
-    mesh.boundaryMesh().findPatchID(phiEReferencePatchName);
-
-if (phiEReferencePatch < 0)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "Unknown potential referencePatch "
-        << phiEReferencePatchName
-        << exit(FatalIOError);
-}
-
-dimensionedScalar phiERef
-(
-    "referencePotential",
-    dimVoltage,
-    potentialDict.get<scalar>("referencePotential")
-);
-
-dimensionedScalar minConductivity
-(
-    "minConductivity",
-    dimConductivity,
-    potentialDict.getOrDefault<scalar>("minConductivity", SMALL)
-);
-
-if (minConductivity.value() < 0.0)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "minConductivity must be non-negative"
-        << exit(FatalIOError);
-}
-
-if (Pstream::parRun())
-{
-    FatalErrorInFunction
-        << "The first simpleCurrent phiE reconstruction implementation "
-        << "supports serial structured meshes only." << nl
-        << "Parallel column reconstruction has not yet been implemented."
-        << exit(FatalError);
-}
-
-const fvsPatchVectorField& refSf =
-    mesh.Sf().boundaryField()[phiEReferencePatch];
-
-vector refAreaVector(vector::zero);
-
-forAll(refSf, facei)
-{
-    refAreaVector += refSf[facei];
-}
-
-if (mag(refAreaVector) <= SMALL)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "referencePatch " << phiEReferencePatchName
-        << " has zero resultant area vector"
-        << exit(FatalIOError);
-}
-
-const vector referencePatchNormal =
-    refAreaVector/mag(refAreaVector);
-
-if
-(
-    mag(mag(referencePatchNormal & electrodeNormal) - 1.0)
-  > directionTolerance
-)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "referencePatch " << phiEReferencePatchName
-        << " is not normal to electrodeNormal." << nl
-        << "reference patch normal = " << referencePatchNormal << nl
-        << "electrodeNormal = " << electrodeNormal
-        << exit(FatalIOError);
-}
+Info<< "Reading electric potential field phiE\n" << endl;
 
 volScalarField phiE
 (
@@ -891,62 +722,27 @@ volScalarField phiE
         "phiE",
         runTime.timeName(),
         mesh,
-        IOobject::NO_READ,
-        writePhiE 
-        ? IOobject::AUTO_WRITE 
-        : IOobject::NO_WRITE
+        IOobject::MUST_READ,
+        writePhiE ? IOobject::AUTO_WRITE : IOobject::NO_WRITE
     ),
-    mesh,
-    dimensionedScalar("zero", dimVoltage, 0.0)
+    mesh
 );
 
-volVectorField gradPhiE
+// potentialManager performs runtime selection from electroChemistry/potential/model.
+// The selected model owns electroneutrality evaluation and potential correction.
+potentialManager potentialMgr
 (
-    IOobject
-    (
-        "gradPhiE",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writeGradPhiE 
-        ? IOobject::AUTO_WRITE 
-        : IOobject::NO_WRITE
-    ),
     mesh,
-    dimensionedVector("zero", dimVoltage/dimLength, vector::zero)
+    electroChemistry,
+    reactions,
+    species,
+    c,
+    phiE,
+    T,
+    Rgas,
+    Fdim
 );
 
-volScalarField kappa
-(
-    IOobject
-    (
-        "kappa",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writeKappa 
-        ? IOobject::AUTO_WRITE 
-        : IOobject::NO_WRITE
-    ),
-    mesh,
-    dimensionedScalar("zero", dimConductivity, 0.0)
-);
-
-volVectorField jDiff
-(
-    IOobject
-    (
-        "jDiff",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writeJDiff
-         ? IOobject::AUTO_WRITE
-         : IOobject::NO_WRITE
-    ),
-    mesh,
-    dimensionedVector("zero", dimCurrentDensity, vector::zero)
-);
 
 //
 // ############################################ diagnostics fields  ############################################

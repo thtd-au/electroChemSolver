@@ -1,9 +1,11 @@
-reactionModels/kineticReactions/reversibleKineticReaction/reversibleKineticReaction.C
-reactionModels/kineticReactions/multiplicativeMonod/multiplicativeMonod.C
-reactionModels/equilibriumReactions/waterEquilibrium/waterEquilibrium.C
-reactionModels/reactionManager.C
-
 electroChem.C
 
-EXE = $(FOAM_USER_APPBIN)/electroChem
+reactionModels/reactionManager/reactionManager.C
+reactionModels/multiplicativeMonod/multiplicativeMonod.C
+reactionModels/reversibleKineticReaction/reversibleKineticReaction.C
+reactionModels/fastEquilibriumReaction/fastEquilibriumReaction.C
 
+potentialModels/potentialManager/potentialManager.C
+potentialModels/electroneutralGalvanostatic/electroneutralGalvanostatic.C
+
+EXE = $(FOAM_USER_APPBIN)/electroChem
