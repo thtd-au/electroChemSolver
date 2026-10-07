@@ -61,16 +61,8 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
         mesh,
         dimensionedVector("zero", dimensionSet(0,-2,0,0,0,1,0), vector::zero)
     ),
-    kappaFace_
-    (
-        IOobject("kappaFace", mesh.time().timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE),
-        fvc::interpolate(kappa_)
-    ),
-    jDiffFlux_
-    (
-        IOobject("jDiffFlux", mesh.time().timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE),
-        (fvc::interpolate(jDiff_) & mesh.Sf())
-    )
+    kappaFace_(nullptr),
+    jDiffFlux_(nullptr)
 {
     if (appliedCurrentDensity_ < 0.0)
     {
@@ -121,12 +113,57 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
     }
 
     selectReferenceCell();
-    updateCurrentFields();
 
-    // Establish the absolute gauge once. Subsequent correction equations hold
-    // deltaPhi(referenceCell)=0, so the datum cannot drift.
-    phiE_[referenceCell_] = referencePotential_;
-    phiE_.correctBoundaryConditions();
+    // Register the face fields required by galvanostaticPotentialFlux, but do
+    // not evaluate the coupled electrode BC during construction.  The first
+    // species transport uses the gradient already stored in phiE (phi^(1)).
+    // After transport, correct() refreshes kappa/jDiff and deliberately updates
+    // the absolute potential BC for the following Picard state.
+    kappaFace_.reset
+    (
+        new surfaceScalarField
+        (
+            IOobject
+            (
+                "kappaFace",
+                mesh.time().timeName(),
+                mesh,
+                IOobject::NO_READ,
+                IOobject::NO_WRITE
+            ),
+            fvc::interpolate(kappa_)
+        )
+    );
+
+    jDiffFlux_.reset
+    (
+        new surfaceScalarField
+        (
+            IOobject
+            (
+                "jDiffFlux",
+                mesh.time().timeName(),
+                mesh,
+                IOobject::NO_READ,
+                IOobject::NO_WRITE
+            ),
+            (fvc::interpolate(jDiff_) & mesh.Sf())
+        )
+    );
+
+    // Preserve the supplied phiE field as the first Picard state.  Only apply
+    // a constant gauge shift, which leaves all electric-field gradients
+    // unchanged, so the selected reference cell matches referencePotential.
+    const scalar gaugeShift = referencePotential_ - phiE_[referenceCell_];
+    phiE_.primitiveFieldRef() += gaugeShift;
+
+    forAll(phiE_.boundaryField(), patchi)
+    {
+        phiE_.boundaryFieldRef()[patchi] += gaugeShift;
+    }
+
+    // Deliberately no phiE_.correctBoundaryConditions() here.
+
 }
 
 void electroneutralGalvanostatic::selectReferenceCell()
@@ -157,20 +194,33 @@ void electroneutralGalvanostatic::updateCurrentFields()
     kappa_ = dimensionedScalar("zero", kappa_.dimensions(), 0.0);
     jDiff_ = dimensionedVector("zero", jDiff_.dimensions(), vector::zero);
 
-    const scalar coeff = sqr(F_.value())/(Rgas_.value()*T_.value());
-
     forAll(c_, i)
     {
-        if (mag(z_[i]) <= SMALL) continue;
+        if (mag(z_[i]) <= SMALL)
+        {
+            continue;
+        }
 
-        kappa_.primitiveFieldRef() += coeff*sqr(z_[i])*D_[i]*c_[i].primitiveField();
-        jDiff_ -= F_.value()*z_[i]*D_[i]*fvc::grad(c_[i]);
+        const dimensionedScalar Di
+        (
+            "D_" + species_[i],
+            dimensionSet(0, 2, -1, 0, 0, 0, 0),
+            D_[i]
+        );
+
+        // Full-field algebra is intentional here.  This routine is called only
+        // after the species transport step, whose electrode BCs have already
+        // been evaluated using the frozen phiE gradient from Picard state k.
+        // Hence boundary concentrations/gradients now belong to c^(k+1).
+        kappa_ +=
+            sqr(F_)*sqr(z_[i])*Di*c_[i]
+           /(Rgas_*T_);
+
+        jDiff_ -= F_*z_[i]*Di*fvc::grad(c_[i]);
     }
 
-    kappa_.correctBoundaryConditions();
-    jDiff_.correctBoundaryConditions();
-    kappaFace_ = fvc::interpolate(kappa_);
-    jDiffFlux_ = fvc::interpolate(jDiff_) & mesh_.Sf();
+    kappaFace_() = fvc::interpolate(kappa_);
+    jDiffFlux_() = fvc::interpolate(jDiff_) & mesh_.Sf();
 }
 
 void electroneutralGalvanostatic::evaluateConstraint()

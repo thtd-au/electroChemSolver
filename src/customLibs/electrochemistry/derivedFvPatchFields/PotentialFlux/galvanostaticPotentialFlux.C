@@ -72,7 +72,17 @@ galvanostaticPotentialFlux::galvanostaticPotentialFlux
             << exit(FatalIOError);
     }
 
-    gradient() = 0.0;
+    // The gradient is the Picard-lagged electrode state consumed by
+    // galvanostaticMolarFlux.  A fresh case may omit it (zero is then the
+    // initial guess); restart files written by this BC retain it.
+    if (dict.found("gradient"))
+    {
+        gradient() = scalarField("gradient", dict, p.size());
+    }
+    else
+    {
+        gradient() = 0.0;
+    }
 
     if (dict.found("value"))
     {
@@ -261,13 +271,14 @@ void galvanostaticPotentialFlux::write
     Ostream& os
 ) const
 {
-    fvPatchScalarField::write(os);
+    // Use the fixedGradient writer so the current Picard-lagged gradient is
+    // retained in restart files together with the patch value.
+    fixedGradientFvPatchScalarField::write(os);
     os.writeEntry
     (
         "electronStoichCoeff",
         electronStoichCoeff_
     );
-    writeEntry("value", os);
 }
 
 } // End namespace Foam

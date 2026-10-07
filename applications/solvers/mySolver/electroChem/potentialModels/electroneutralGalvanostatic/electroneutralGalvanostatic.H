@@ -31,8 +31,8 @@ class electroneutralGalvanostatic : public potentialModel
 
     volScalarField kappa_;
     volVectorField jDiff_;
-    surfaceScalarField kappaFace_;
-    surfaceScalarField jDiffFlux_;
+    autoPtr<surfaceScalarField> kappaFace_;
+    autoPtr<surfaceScalarField> jDiffFlux_;
 
     void updateCurrentFields();
     void selectReferenceCell();

@@ -248,8 +248,11 @@ void galvanostaticMolarFlux::updateCoeffs()
             << exit(FatalError);
     }
 
-    tmp<scalarField> tsnGradPhiE = phiEPatch.snGrad();
-    const scalarField& snGradPhiE = tsnGradPhiE();
+    // Picard-lagged electrode coupling:
+    // consume the gradient already stored by galvanostaticPotentialFlux.
+    // Do not call phiEPatch.snGrad() here, since that may trigger
+    // galvanostaticPotentialFlux::updateCoeffs() recursively.
+    const scalarField& snGradPhiE = potentialFluxBC.gradient();
     const scalarField& delta = patch().deltaCoeffs();
 
     scalarField beta(patch().size(), 0.0);
