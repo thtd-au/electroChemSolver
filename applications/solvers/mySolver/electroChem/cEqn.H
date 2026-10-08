@@ -96,19 +96,43 @@ forAll(c, i)
     fvOptions.correct(ci);
     ci.correctBoundaryConditions();
 
-    cMinAfterTransport[i] = gMin(ci.primitiveField());
-    cMeanAfterTransport[i] =
-        gSum(ci.primitiveField()*mesh.V())/domainVolume;
-    cMaxAfterTransport[i] = gMax(ci.primitiveField());
+    // cMinAfterTransport[i] = gMin(ci.primitiveField());
+    // cMeanAfterTransport[i] =
+    //     gSum(ci.primitiveField()*mesh.V())/domainVolume;
+    // cMaxAfterTransport[i] = gMax(ci.primitiveField());
 
-    if (cMinAfterTransport[i] < 0.0)
+    // if (cMinAfterTransport[i] < 0.0)
+    // {
+    //     FatalErrorInFunction
+    //         << "Negative concentration after transport for " << species[i]
+    //         << ": min(c)=" << cMinAfterTransport[i] << nl
+    //         << "PotentialReaction does not clip concentrations because that "
+    //         << "would alter the transported physical state."
+    //         << exit(FatalError);
+    // }
+
+    const scalar minCi = gMin(c[i]);
+
+    if (minCi < -negativeConcentrationTolerance)
     {
         FatalErrorInFunction
-            << "Negative concentration after transport for " << species[i]
-            << ": min(c)=" << cMinAfterTransport[i] << nl
-            << "PotentialReaction does not clip concentrations because that "
-            << "would alter the transported physical state."
+            << "Negative concentration after transport for "
+            << species[i] << ": min(c)=" << minCi << " mol/m3" << nl
+            << "negativeConcentrationTolerance="
+            << negativeConcentrationTolerance << " mol/m3" << nl
+            << "The undershoot exceeds the permitted numerical tolerance."
             << exit(FatalError);
+    }
+
+    if (minCi < 0.0)
+    {
+        Info<< "Clipping numerical concentration undershoot for "
+            << species[i]
+            << ": min(c)=" << minCi << " mol/m3"
+            << " -> 0"
+            << nl;
+
+        c[i].max(0.0);
     }
 }
 

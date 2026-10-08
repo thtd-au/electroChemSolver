@@ -112,6 +112,15 @@ int main(int argc, char *argv[])
         // --- Coupled electrochemical Picard loop
         const dictionary& picardDict = mesh.solutionDict().subDict("Picard");
         const label maxPicardIter = picardDict.get<label>("maxIter");
+        const dictionary& transportPicard = picardDict.subDict("transport");
+        const scalar negativeConcentrationTolerance = transportPicard.get<scalar>("negativeConcentrationTolerance");
+
+        if (negativeConcentrationTolerance < 0.0)
+        {
+            FatalIOErrorInFunction(transportPicard)
+                << "negativeConcentrationTolerance must be >= 0"
+                << exit(FatalIOError);
+        }
 
         if (maxPicardIter <= 0)
         {

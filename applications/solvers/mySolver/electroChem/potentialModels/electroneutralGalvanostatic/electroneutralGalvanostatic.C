@@ -334,6 +334,14 @@ void electroneutralGalvanostatic::correct()
     deltaEqn.setReference(referenceCell_, 0.0);
     deltaEqn.solve(phiE_.name());
 
+    const scalar maxAbsDeltaPhi = gMax(mag(deltaPhi.primitiveField()));
+    Info<< "Potential correction: max|deltaPhiE|="
+        << maxAbsDeltaPhi << " V"
+        << ", relaxation=" << relaxation_
+        << ", applied max|alpha*deltaPhiE|="
+        << relaxation_*maxAbsDeltaPhi << " V"
+        << nl;
+
     phiE_.primitiveFieldRef() += relaxation_*deltaPhi.primitiveField();
     phiE_.correctBoundaryConditions();
 
@@ -344,18 +352,148 @@ void electroneutralGalvanostatic::report() const
 {
     scalar maxAbs = 0.0;
     scalar maxRel = 0.0;
+    label worstCell = -1;
+
     forAll(chargeResidual_, celli)
     {
-        maxAbs = max(maxAbs, mag(chargeResidual_[celli]));
-        maxRel = max(maxRel, mag(chargeResidual_[celli])/chargeScale_[celli]);
+        const scalar absE = mag(chargeResidual_[celli]);
+        const scalar relE = absE/chargeScale_[celli];
+
+        if (absE > maxAbs)
+        {
+            maxAbs = absE;
+            worstCell = celli;
+        }
+
+        maxRel = max(maxRel, relE);
     }
+
     reduce(maxAbs, maxOp<scalar>());
     reduce(maxRel, maxOp<scalar>());
 
     Info<< "Electroneutrality: max|E|=" << maxAbs
         << " mol/m3, max relative=" << maxRel
-        << ", converged=" << (evaluated_ && converged_ ? "yes" : "no")
+        << ", converged="
+        << (evaluated_ && converged_ ? "yes" : "no")
         << nl;
+
+    if (worstCell >= 0)
+    {
+        Info<< "  worst cell=" << worstCell
+            << ", centre=" << mesh_.C()[worstCell]
+            << ", E=" << chargeResidual_[worstCell]
+            << " mol/m3"
+            << ", relative="
+            << mag(chargeResidual_[worstCell])
+              /chargeScale_[worstCell]
+            << nl;
+
+        Info<< "  charged-species contributions:" << nl;
+
+        forAll(c_, i)
+        {
+            if (mag(z_[i]) > SMALL)
+            {
+                Info<< "    " << species_[i]
+                    << ": z=" << z_[i]
+                    << ", c=" << c_[i][worstCell]
+                    << ", z*c=" << z_[i]*c_[i][worstCell]
+                    << " mol/m3"
+                    << nl;
+            }
+        }
+
+        // Global charge diagnostic for the currently evaluated transported state.
+        scalar integratedE = 0.0;
+        scalar integratedAbsE = 0.0;
+        scalar totalVolume = 0.0;
+
+        const scalarField& cellVolumes = mesh_.V();
+        forAll(chargeResidual_, celli)
+        {
+            const scalar dQ = cellVolumes[celli]*chargeResidual_[celli];
+            integratedE += dQ;
+            integratedAbsE += mag(dQ);
+            totalVolume += cellVolumes[celli];
+        }
+        reduce(integratedE, sumOp<scalar>());
+        reduce(integratedAbsE, sumOp<scalar>());
+        reduce(totalVolume, sumOp<scalar>());
+
+        Info<< "  Integrated charge: sum(V*E)=" << integratedE
+            << " mol charge-equivalents"
+            << ", F*sum(V*E)=" << F_.value()*integratedE << " C" << nl
+            << "  Absolute charge integral: sum(V*|E|)="
+            << integratedAbsE << " mol charge-equivalents" << nl
+            << "  Volume-mean signed E=" << integratedE/totalVolume
+            << " mol/m3"
+            << ", cancellation ratio="
+            << (integratedAbsE > VSMALL
+                ? mag(integratedE)/integratedAbsE : 0.0)
+            << nl;
+
+        // Diagnostic: electroneutrality profile through the worst-cell column.
+        // Select cells whose centres have the same x,z location as worstCell,
+        // then report the cells closest to the worst cell in y.
+
+        const vector& worstCentre = mesh_.C()[worstCell];
+
+        DynamicList<label> columnCells;
+
+        const scalar geomTol = 1e-9;
+
+        forAll(mesh_.C(), celli)
+        {
+            const vector& cc = mesh_.C()[celli];
+
+            if
+            (
+                mag(cc.x() - worstCentre.x()) < geomTol
+            && mag(cc.z() - worstCentre.z()) < geomTol
+            )
+            {
+                columnCells.append(celli);
+            }
+        }
+
+        // Sort manually by distance in y from the worst cell.
+        // Diagnostic only, so keep this independent of mesh numbering.
+        for (label i = 0; i < columnCells.size(); ++i)
+        {
+            for (label j = i + 1; j < columnCells.size(); ++j)
+            {
+                const scalar di =
+                    mag(mesh_.C()[columnCells[i]].y() - worstCentre.y());
+
+                const scalar dj =
+                    mag(mesh_.C()[columnCells[j]].y() - worstCentre.y());
+
+                if (dj < di)
+                {
+                    const label tmp = columnCells[i];
+                    columnCells[i] = columnCells[j];
+                    columnCells[j] = tmp;
+                }
+            }
+        }
+
+        Info<< "  electroneutrality profile from worst cell:" << nl;
+        Info<< "    cell        y [m]        E [mol/m3]        relative" << nl;
+
+        const label nReport = min(label(10), columnCells.size());
+
+        for (label n = 0; n < nReport; ++n)
+        {
+            const label celli = columnCells[n];
+
+            Info<< "    "
+                << celli << "    "
+                << mesh_.C()[celli].y() << "    "
+                << chargeResidual_[celli] << "    "
+                << mag(chargeResidual_[celli])/chargeScale_[celli]
+                << nl;
+        }
+    }
 }
 
 } // End namespace Foam
