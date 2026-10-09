@@ -1,6 +1,7 @@
 #include "electroneutralGalvanostatic.H"
 #include "addToRunTimeSelectionTable.H"
 #include "fixedGradientFvPatchFields.H"
+#include "fixedValueFvPatchFields.H"
 #include "fvc.H"
 #include "fvcGrad.H"
 #include "fvcDiv.H"
@@ -154,15 +155,27 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
     // Preserve the supplied phiE field as the first Picard state.  Only apply
     // a constant gauge shift, which leaves all electric-field gradients
     // unchanged, so the selected reference cell matches referencePotential.
-    const scalar gaugeShift = referencePotential_ - phiE_[referenceCell_];
-    phiE_.primitiveFieldRef() += gaugeShift;
-
+    bool hasFixedPotential = false;
     forAll(phiE_.boundaryField(), patchi)
     {
-        phiE_.boundaryFieldRef()[patchi] += gaugeShift;
+        if (isA<fixedValueFvPatchScalarField>(phiE_.boundaryField()[patchi]))
+        {
+            hasFixedPotential = true;
+        }
     }
-
-    // Deliberately no phiE_.correctBoundaryConditions() here.
+    if (!hasFixedPotential)
+    {
+        const scalar gaugeShift = referencePotential_ - phiE_[referenceCell_];
+        phiE_.primitiveFieldRef() += gaugeShift;
+        forAll(phiE_.boundaryField(), patchi)
+        {
+            phiE_.boundaryFieldRef()[patchi] += gaugeShift;
+        }
+    }
+    else
+    {
+        Info<< "Test1F: fixed-potential reservoir detected; initial gauge shift disabled" << nl;
+    }
 
 }
 
@@ -186,7 +199,20 @@ void electroneutralGalvanostatic::selectReferenceCell()
             << "referencePatch " << referencePatchName_ << " has no faces"
             << exit(FatalError);
     }
-    referenceCell_ = localCandidate;
+    // TEST 1C: optional gauge-location-only A/B override.
+    const label overrideCell = potentialDict_.getOrDefault<label>
+    (
+        "test1CReferenceCell", -1
+    );
+    if (overrideCell >= mesh_.nCells())
+    {
+        FatalIOErrorInFunction(potentialDict_)
+            << "test1CReferenceCell out of range: " << overrideCell
+            << exit(FatalIOError);
+    }
+    referenceCell_ = overrideCell >= 0 ? overrideCell : localCandidate;
+    Info<< "Test1C selected reference cell=" << referenceCell_
+        << " (patch candidate=" << localCandidate << ")" << nl;
 }
 
 void electroneutralGalvanostatic::updateCurrentFields()
@@ -221,6 +247,78 @@ void electroneutralGalvanostatic::updateCurrentFields()
 
     kappaFace_() = fvc::interpolate(kappa_);
     jDiffFlux_() = fvc::interpolate(jDiff_) & mesh_.Sf();
+
+
+    // DIAGNOSTIC ONLY: compare two diffusion-current face discretizations.
+    // The first uses the snGrad operator of the species diffusion Laplacian;
+    // the second is the existing reconstructed-gradient potential flux.
+    surfaceScalarField jDiffSpeciesFaces
+    (
+        IOobject
+        (
+            "jDiffSpeciesFacesAudit", mesh_.time().timeName(), mesh_,
+            IOobject::NO_READ, IOobject::NO_WRITE
+        ),
+        mesh_,
+        dimensionedScalar("zero", jDiffFlux_().dimensions(), 0.0)
+    );
+
+    forAll(c_, i)
+    {
+        if (mag(z_[i]) <= SMALL) continue;
+        const dimensionedScalar Di
+        (
+            "D_audit_" + species_[i],
+            dimensionSet(0, 2, -1, 0, 0, 0, 0), D_[i]
+        );
+        jDiffSpeciesFaces -=
+            F_*z_[i]*Di*fvc::snGrad(c_[i])*mesh_.magSf();
+    }
+
+    surfaceScalarField jDiffMismatch
+    (
+        IOobject
+        (
+            "jDiffMismatchAudit", mesh_.time().timeName(), mesh_,
+            IOobject::NO_READ, IOobject::NO_WRITE
+        ),
+        jDiffSpeciesFaces - jDiffFlux_()
+    );
+
+    tmp<volScalarField> tDivMismatch = fvc::div(jDiffMismatch);
+    const volScalarField& divMismatch = tDivMismatch();
+
+    Info<< "Diffusion-flux audit: max internal |face mismatch|="
+        << gMax(mag(jDiffMismatch.primitiveField())) << " A" << nl
+        << "  max cell |div(mismatch)|="
+        << gMax(mag(divMismatch.primitiveField())) << " A/m3" << nl;
+
+    for (label celli = 2597; celli <= 2599; ++celli)
+    {
+        if (celli < mesh_.nCells())
+        {
+            Info<< "  diffusion mismatch divergence cell " << celli
+                << " = " << divMismatch[celli] << " A/m3" << nl;
+        }
+    }
+
+    forAll(mesh_.boundary(), patchi)
+    {
+        const scalarField& mismatchPatch = jDiffMismatch.boundaryField()[patchi];
+        const scalarField& speciesPatch = jDiffSpeciesFaces.boundaryField()[patchi];
+        const scalarField& potentialPatch = jDiffFlux_().boundaryField()[patchi];
+        Info<< "  patch " << mesh_.boundary()[patchi].name()
+            << ": sum species diffusion current=" << sum(speciesPatch)
+            << " A, sum potential diffusion current=" << sum(potentialPatch)
+            << " A, sum mismatch=" << sum(mismatchPatch) << " A" << nl;
+    }
+
+    // A/B experiment: use the species-Laplacian face-normal diffusion current
+    // for BOTH the potential equation RHS and galvanostatic potential BC.
+    // The audit above intentionally retains the original reconstruction
+    // for comparison before this assignment.
+    jDiffFlux_() = jDiffSpeciesFaces;
+    Info<< "Diffusion A/B: potential current now uses species snGrad face flux" << nl;
 }
 
 void electroneutralGalvanostatic::evaluateConstraint()
@@ -272,22 +370,28 @@ void electroneutralGalvanostatic::setCorrectionBoundaryConditions
         fvPatchScalarField& dp = deltaPhi.boundaryFieldRef()[patchi];
         const fvPatchScalarField& p = phiE_.boundaryField()[patchi];
 
-        fixedGradientFvPatchScalarField& dpg =
-            refCast<fixedGradientFvPatchScalarField>(dp);
-
-        if (isA<fixedGradientFvPatchScalarField>(p))
+        if (isA<fixedValueFvPatchScalarField>(p))
         {
-            const fixedGradientFvPatchScalarField& pg =
-                refCast<const fixedGradientFvPatchScalarField>(p);
-
-            // Absolute required gradient minus gradient already carried by phiE.
-            dpg.gradient() = pg.gradient() - p.snGrad();
+            fixedValueFvPatchScalarField& dpv =
+                refCast<fixedValueFvPatchScalarField>(dp);
+            // The absolute potential boundary is already prescribed.
+            // Its correction must vanish at the reservoir.
+            dpv == scalar(0);
         }
         else
         {
-            // zeroGradient and other non-flux absolute boundaries receive no
-            // correction-normal-gradient in v1.
-            dpg.gradient() = 0.0;
+            fixedGradientFvPatchScalarField& dpg =
+                refCast<fixedGradientFvPatchScalarField>(dp);
+            if (isA<fixedGradientFvPatchScalarField>(p))
+            {
+                const fixedGradientFvPatchScalarField& pg =
+                    refCast<const fixedGradientFvPatchScalarField>(p);
+                dpg.gradient() = pg.gradient() - p.snGrad();
+            }
+            else
+            {
+                dpg.gradient() = 0.0;
+            }
         }
     }
 }
@@ -309,6 +413,17 @@ void electroneutralGalvanostatic::correct()
     phiE_.boundaryFieldRef().evaluate();
 
     wordList correctionPatchTypes(mesh_.boundary().size(), "fixedGradient");
+    bool hasFixedPotential = false;
+    forAll(phiE_.boundaryField(), patchi)
+    {
+        if (isA<fixedValueFvPatchScalarField>(phiE_.boundaryField()[patchi]))
+        {
+            correctionPatchTypes[patchi] = "fixedValue";
+            hasFixedPotential = true;
+        }
+    }
+    Info<< "Test1F correction BC mode="
+        << (hasFixedPotential ? "mixed Dirichlet-Neumann" : "all-Neumann") << nl;
 
     volScalarField deltaPhi
     (
@@ -322,17 +437,302 @@ void electroneutralGalvanostatic::correct()
     deltaPhi.correctBoundaryConditions();
 
     // Residual correction of the frozen-concentration absolute equation:
-    // div(kappa grad(deltaPhi)) = div(jDiff) - div(kappa grad(phiE)).
+    // div(kappa grad(deltaPhi)) = div(jDiffSpeciesFaces)
+    //                                - div(kappa grad(phiE)).
     fvScalarMatrix deltaEqn
     (
         fvm::laplacian(kappa_, deltaPhi)
       ==
-        fvc::div(jDiff_)
+        fvc::div(jDiffFlux_())
       - fvc::laplacian(kappa_, phiE_)
     );
 
-    deltaEqn.setReference(referenceCell_, 0.0);
+
+    // TEST 1E: diagnostic only. Evaluate species diffusive and migration
+    // currents on every boundary, using the frozen transported state.
+    // No boundary conditions or equation coefficients are modified.
+    Info<< "Test1E boundary ionic-current audit (outward A):" << nl;
+    forAll(mesh_.boundary(), patchi)
+    {
+        const word& patchName = mesh_.boundary()[patchi].name();
+        if
+        (
+            patchName != "inlet" && patchName != "outlet"
+         && patchName != "cathode" && patchName != "anode"
+        ) continue;
+
+        scalar diffSum = 0.0;
+        scalar migSum = 0.0;
+        const scalarField& faceAreas = mesh_.magSf().boundaryField()[patchi];
+        const scalarField potentialNormalGrad =
+            phiE_.boundaryField()[patchi].snGrad();
+        const scalarField kappaFaces(kappaFace_().boundaryField()[patchi]);
+
+        forAll(c_, i)
+        {
+            if (mag(z_[i]) <= SMALL) continue;
+            const scalarField speciesNormalGrad
+            (
+                c_[i].boundaryField()[patchi].snGrad()
+            );
+            scalar speciesDiff = 0.0;
+            forAll(faceAreas, facei)
+            {
+                speciesDiff -=
+                    F_.value()*z_[i]*D_[i]
+                   *speciesNormalGrad[facei]*faceAreas[facei];
+            }
+            diffSum += speciesDiff;
+            if (patchName == "inlet" || patchName == "outlet")
+            {
+                Info<< "  Test1E " << patchName << " species "
+                    << species_[i]
+                    << " bc=" << c_[i].boundaryField()[patchi].type()
+                    << " diffCurrent=" << speciesDiff << " A" << nl;
+            }
+        }
+
+        forAll(faceAreas, facei)
+        {
+            migSum -= kappaFaces[facei]
+                *potentialNormalGrad[facei]*faceAreas[facei];
+        }
+
+        const scalar potentialDiff =
+            sum(jDiffFlux_().boundaryField()[patchi]);
+        Info<< "  Test1E patch " << patchName
+            << " phiBC=" << phiE_.boundaryField()[patchi].type()
+            << " speciesDiff=" << diffSum
+            << " potentialDiff=" << potentialDiff
+            << " migration=" << migSum
+            << " totalIonic=" << diffSum + migSum
+            << " A" << nl;
+    }
+
+    // TEST 1C: capture the unreferenced equation BEFORE gauge modification.
+    // fvMatrix::residual() returns a per-cell algebraic residual for the
+    // CURRENT (pre-solve) deltaPhi, including its explicit source.
+    const scalarField preReferenceResidual(deltaEqn.residual());
+    // TEST 1D: for a pure-Neumann Laplacian, sum of the unreferenced
+    // algebraic residual at deltaPhi=0 is the discrete compatibility defect.
+    // At this point deltaPhi is identically zero and BCs are evaluated.
+    const scalar preReferenceGlobalSum = gSum(preReferenceResidual);
+    Info<< "Test1D pre-reference global sum residual="
+        << preReferenceGlobalSum << " A (integrated)" << nl;
+
+    if (!hasFixedPotential)
+    {
+        const scalar preReferenceDiag = deltaEqn.diag()[referenceCell_];
+        const scalar preReferenceSource = deltaEqn.source()[referenceCell_];
+        Info<< "Test1C before reference: cell=" << referenceCell_
+            << " diag=" << preReferenceDiag
+            << " source=" << preReferenceSource
+            << " residual=" << preReferenceResidual[referenceCell_] << nl;
+        deltaEqn.setReference(referenceCell_, 0.0);
+        Info<< "Test1C reference modification: deltaDiag="
+            << deltaEqn.diag()[referenceCell_] - preReferenceDiag
+            << " deltaSource="
+            << deltaEqn.source()[referenceCell_] - preReferenceSource << nl;
+    }
+    else
+    {
+        Info<< "Test1F: skipping setReference; Dirichlet reservoir fixes gauge" << nl;
+    }
     deltaEqn.solve(phiE_.name());
+
+    // Evaluate ORIGINAL unreferenced discrete balance at the solved deltaPhi.
+    // Keep the original equation as a separate matrix object so the
+    // reference-row modification cannot hide the physical residual.
+    fvScalarMatrix unreferencedEqn
+    (
+        fvm::laplacian(kappa_, deltaPhi)
+      ==
+        fvc::div(jDiffFlux_())
+      - fvc::laplacian(kappa_, phiE_)
+    );
+    const scalarField physicalResidual(unreferencedEqn.residual());
+    const scalarField referencedResidual(deltaEqn.residual());
+    // TEST 1D: the sum of unreferenced residuals should equal the
+    // global Neumann compatibility defect, regardless of gauge location.
+    const scalar globalPhysicalResidual = gSum(physicalResidual);
+    const scalar globalReferencedResidual = gSum(referencedResidual);
+    const scalar refResidual = physicalResidual[referenceCell_]; // diagnostic only for Dirichlet
+    Info<< "Test1D post-solve global unreferenced residual="
+        << globalPhysicalResidual
+        << " A, referenceCellResidual=" << refResidual
+        << " A, global referenced residual=" << globalReferencedResidual
+        << " A, (global-refCell)="
+        << globalPhysicalResidual-refResidual << " A" << nl;
+
+
+    scalar maxPhysical = 0.0;
+    label maxPhysicalCell = -1;
+    forAll(physicalResidual, celli)
+    {
+        if (mag(physicalResidual[celli]) > maxPhysical)
+        {
+            maxPhysical = mag(physicalResidual[celli]);
+            maxPhysicalCell = celli;
+        }
+    }
+    Info<< "Test1C original unreferenced equation: max|algebraic residual|="
+        << maxPhysical << " (integrated equation units), cell="
+        << maxPhysicalCell << nl;
+    for (label celli = 0; celli < mesh_.nCells(); ++celli)
+    {
+        if (celli != referenceCell_ && celli > 3 && celli < 2597) continue;
+        if (celli > 2599 && celli != referenceCell_) continue;
+        Info<< "  Test1C cell " << celli
+            << ": originalResidual=" << physicalResidual[celli]
+            << ", referencedResidual=" << referencedResidual[celli]
+            << ", originalResidual/V="
+            << physicalResidual[celli]/mesh_.V()[celli]
+            << " (volume-normalized)" << nl;
+    }
+
+    // TEST 1B diagnostic: frozen-state species migration versus the
+    // conductivity-weighted potential migration, before applying deltaPhi.
+    // This is a face-flux compatibility check, not an exact matrix residual.
+    surfaceScalarField speciesMigrationFrozenAudit
+    (
+        IOobject("speciesMigrationFrozenAudit", mesh_.time().timeName(), mesh_,
+            IOobject::NO_READ, IOobject::NO_WRITE, false),
+        mesh_, dimensionedScalar("zero", jDiffFlux_().dimensions(), 0.0)
+    );
+    const surfaceScalarField gradPhiFrozenAudit
+    (
+        IOobject("gradPhiFrozenAudit", mesh_.time().timeName(), mesh_,
+            IOobject::NO_READ, IOobject::NO_WRITE, false),
+        fvc::snGrad(phiE_)*mesh_.magSf()
+    );
+    forAll(c_, i)
+    {
+        if (mag(z_[i]) <= SMALL) continue;
+        const dimensionedScalar Di
+        (
+            "D_audit_" + species_[i],
+            dimensionSet(0, 2, -1, 0, 0, 0, 0), D_[i]
+        );
+        speciesMigrationFrozenAudit -=
+            F_*z_[i]
+           *fvc::interpolate(Di*z_[i]*F_/(Rgas_*T_)*c_[i])
+           *gradPhiFrozenAudit;
+    }
+    const surfaceScalarField potentialMigrationFrozenAudit
+    (
+        IOobject("potentialMigrationFrozenAudit", mesh_.time().timeName(),
+            mesh_, IOobject::NO_READ, IOobject::NO_WRITE, false),
+        -fvc::interpolate(kappa_)*gradPhiFrozenAudit
+    );
+    const surfaceScalarField migrationMismatchFrozenAudit
+    (
+        IOobject("migrationMismatchFrozenAudit", mesh_.time().timeName(),
+            mesh_, IOobject::NO_READ, IOobject::NO_WRITE, false),
+        speciesMigrationFrozenAudit - potentialMigrationFrozenAudit
+    );
+    const volScalarField migrationMismatchDivAudit
+    (
+        fvc::div(migrationMismatchFrozenAudit)
+    );
+    Info<< "Test1B frozen migration algebra: max internal |difference|="
+        << gMax(mag(migrationMismatchFrozenAudit.primitiveField()))
+        << " A, max cell |div difference|="
+        << gMax(mag(migrationMismatchDivAudit.primitiveField()))
+        << " A/m3" << nl;
+
+    // The correction matrix is the actual potential operator solved here.
+    // Its flux contains ONLY the implicit deltaPhi Laplacian; the absolute
+    // phiE gradient and jDiff are separate explicit RHS terms.
+    const surfaceScalarField deltaMatrixFluxAudit
+    (
+        IOobject("deltaMatrixFluxAudit", mesh_.time().timeName(), mesh_,
+            IOobject::NO_READ, IOobject::NO_WRITE, false),
+        deltaEqn.flux()
+    );
+    const surfaceScalarField deltaSnGradFluxAudit
+    (
+        IOobject("deltaSnGradFluxAudit", mesh_.time().timeName(), mesh_,
+            IOobject::NO_READ, IOobject::NO_WRITE, false),
+        fvc::interpolate(kappa_)*fvc::snGrad(deltaPhi)*mesh_.magSf()
+    );
+    const surfaceScalarField deltaFluxMismatchAudit
+    (
+        IOobject("deltaFluxMismatchAudit", mesh_.time().timeName(), mesh_,
+            IOobject::NO_READ, IOobject::NO_WRITE, false),
+        deltaMatrixFluxAudit - deltaSnGradFluxAudit
+    );
+    Info<< "Test1B potential correction matrix flux: max internal |matrix-snGrad|="
+        << gMax(mag(deltaFluxMismatchAudit.primitiveField()))
+        << " A" << nl;
+
+    const surfaceScalarField absoluteCurrentFrozenAudit
+    (
+        IOobject("absoluteCurrentFrozenAudit", mesh_.time().timeName(),
+            mesh_, IOobject::NO_READ, IOobject::NO_WRITE, false),
+        jDiffFlux_() + potentialMigrationFrozenAudit
+    );
+    const surfaceScalarField correctedCurrentUnrelaxedAudit
+    (
+        IOobject("correctedCurrentUnrelaxedAudit", mesh_.time().timeName(),
+            mesh_, IOobject::NO_READ, IOobject::NO_WRITE, false),
+        absoluteCurrentFrozenAudit - deltaMatrixFluxAudit
+    );
+    // TEST 1D: boundary currents of the UNRELAXED correction state.
+    // Outward patch sums must agree with the volume-integrated current
+    // divergence, including the contribution at the reference cell.
+    scalar boundaryNetCurrent = 0.0;
+    forAll(mesh_.boundary(), patchi)
+    {
+        const scalar patchCurrent =
+            sum(correctedCurrentUnrelaxedAudit.boundaryField()[patchi]);
+        boundaryNetCurrent += patchCurrent;
+        Info<< "Test1D boundary current "
+            << mesh_.boundary()[patchi].name()
+            << "=" << patchCurrent << " A" << nl;
+    }
+    Info<< "Test1D net outward boundary current="
+        << boundaryNetCurrent << " A" << nl;
+
+    const volScalarField correctedCurrentDivAudit
+    (
+        fvc::div(correctedCurrentUnrelaxedAudit)
+    );
+    scalar volumeIntegratedDiv = 0.0;
+    forAll(mesh_.V(), celli)
+    {
+        volumeIntegratedDiv +=
+            correctedCurrentDivAudit[celli]*mesh_.V()[celli];
+    }
+    Info<< "Test1D volume integrated corrected-current divergence="
+        << volumeIntegratedDiv << " A, boundary-minus-volume="
+        << boundaryNetCurrent-volumeIntegratedDiv << " A" << nl;
+
+    Info<< "Test1B unrelaxed correction current: max cell |div|="
+        << gMax(mag(correctedCurrentDivAudit.primitiveField()))
+        << " A/m3 (matrix-flux reconstruction, not assembled residual)" << nl;
+
+    forAll(mesh_.boundary(), patchi)
+    {
+        Info<< "  Test1B patch " << mesh_.boundary()[patchi].name()
+            << ": speciesMig="
+            << sum(speciesMigrationFrozenAudit.boundaryField()[patchi])
+            << " A, potentialMig="
+            << sum(potentialMigrationFrozenAudit.boundaryField()[patchi])
+            << " A, deltaMatrix="
+            << sum(deltaMatrixFluxAudit.boundaryField()[patchi])
+            << " A, correctedCurrent="
+            << sum(correctedCurrentUnrelaxedAudit.boundaryField()[patchi])
+            << " A" << nl;
+    }
+    for (label celli = 0; celli < mesh_.nCells(); ++celli)
+    {
+        if (celli > 3 && celli < 2597) continue;
+        if (celli > 2599) break;
+        Info<< "  Test1B cell " << celli
+            << ": migrationMismatchDiv=" << migrationMismatchDivAudit[celli]
+            << ", correctedCurrentDiv=" << correctedCurrentDivAudit[celli]
+            << " A/m3" << nl;
+    }
 
     const scalar maxAbsDeltaPhi = gMax(mag(deltaPhi.primitiveField()));
     Info<< "Potential correction: max|deltaPhiE|="
