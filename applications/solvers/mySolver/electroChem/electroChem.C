@@ -112,6 +112,14 @@ int main(int argc, char *argv[])
         // --- Coupled electrochemical Picard loop
         const dictionary& picardDict = mesh.solutionDict().subDict("Picard");
         const label maxPicardIter = picardDict.get<label>("maxIter");
+        const dictionary diagnosticMode = picardDict.found("diagnosticMode")
+            ? picardDict.subDict("diagnosticMode") : dictionary();
+        const bool forceFixedIterations =
+            diagnosticMode.getOrDefault<bool>("forceFixedIterations", false);
+        const bool writeChargeFields1I =
+            diagnosticMode.getOrDefault<bool>("writeChargeFields", false);
+        const bool runFullDiagnostics1I =
+            diagnosticMode.getOrDefault<bool>("runFullDiagnostics", !forceFixedIterations);
         const dictionary& transportPicard = picardDict.subDict("transport");
         const scalar negativeConcentrationTolerance = transportPicard.get<scalar>("negativeConcentrationTolerance");
 
@@ -134,6 +142,11 @@ int main(int argc, char *argv[])
         // phiE is deliberately NOT reset: it starts from the previously
         // converged physical-time value read/retained by the solver.
         reactionMgr.resetEquilibriumSources();
+
+        // Retained across cEqn.H include scope and all Picard sweeps.
+        scalarList cPreMin1I(c.size(), 0.0);
+        scalarList cPreMean1I(c.size(), 0.0);
+        scalarList cPreMax1I(c.size(), 0.0);
 
         bool electroChemConverged = false;
         label testedPicardStates = 0;
@@ -162,7 +175,7 @@ int main(int argc, char *argv[])
             reactionMgr.reportEquilibrium();
             potentialMgr.report();
 
-            if (equilibriumOK && electroneutralityOK)
+            if (!forceFixedIterations && equilibriumOK && electroneutralityOK)
             {
                 electroChemConverged = true;
                 break;
@@ -190,7 +203,7 @@ int main(int argc, char *argv[])
             // next complete cEqn transport before either constraint is tested.
         }
 
-        if (!electroChemConverged)
+        if (!electroChemConverged && !forceFixedIterations)
         {
             Info<< nl
                 << "Final electrochemical constraint state after "
@@ -206,10 +219,118 @@ int main(int argc, char *argv[])
                 << exit(FatalError);
         }
 
-        // Post-convergence closure and diagnostics operate only on an accepted
-        // electrochemical state.
+        if (forceFixedIterations)
+        {
+            Info<< "TEST1I FORCED STATE (NOT CONVERGED/VALIDATED): time="
+                << runTime.timeName() << ", sweeps=" << testedPicardStates
+                << ", equilibriumOK=" << reactionMgr.equilibriumConverged()
+                << ", electroneutralityOK=" << potentialMgr.converged()
+                << nl;
+        }
+
+        // Optional spatial charge diagnostics, evaluated on the final transported state.
+        if (writeChargeFields1I)
+        {
+            const dictionary* zDict1I = reactions.found("chargeNumber")
+                ? &reactions.subDict("chargeNumber") : nullptr;
+            molarCharge = dimensionedScalar
+            (
+                "zero", molarCharge.dimensions(), 0.0
+            );
+            volScalarField relativeCharge1I
+            (
+                IOobject("relativeCharge1I", runTime.timeName(), mesh,
+                    IOobject::NO_READ, IOobject::NO_WRITE),
+                mesh,
+                dimensionedScalar("zero", dimless, 0.0)
+            );
+            scalarField ionicScale1I(mesh.nCells(), 0.0);
+            forAll(c, i)
+            {
+                const scalar zi = zDict1I
+                    ? zDict1I->getOrDefault<scalar>(species[i], 0.0) : 0.0;
+                if (mag(zi) <= SMALL) continue;
+                molarCharge += zi*c[i];
+                forAll(ionicScale1I, celli)
+                {
+                    ionicScale1I[celli] += mag(zi)*c[i][celli];
+                }
+            }
+            scalar maxAbs1I = 0.0;
+            scalar maxRel1I = 0.0;
+            scalar integratedAbs1I = 0.0;
+            scalar integratedSigned1I = 0.0;
+            forAll(ionicScale1I, celli)
+            {
+                const scalar E = molarCharge[celli];
+                const scalar rel = mag(E)/max(ionicScale1I[celli], SMALL);
+                relativeCharge1I[celli] = rel;
+                maxAbs1I = max(maxAbs1I, mag(E));
+                maxRel1I = max(maxRel1I, rel);
+                integratedAbs1I += mag(E)*mesh.V()[celli];
+                integratedSigned1I += E*mesh.V()[celli];
+            }
+            reduce(maxAbs1I, maxOp<scalar>());
+            reduce(maxRel1I, maxOp<scalar>());
+            reduce(integratedAbs1I, sumOp<scalar>());
+            reduce(integratedSigned1I, sumOp<scalar>());
+            Info<< "TEST1I CHARGE: maxAbs=" << maxAbs1I
+                << " mol/m3, maxRel=" << maxRel1I
+                << ", integralAbs=" << integratedAbs1I
+                << " mol, integralSigned=" << integratedSigned1I << " mol" << nl;
+            if (runTime.writeTime())
+            {
+                molarCharge.write();
+                relativeCharge1I.write();
+            }
+        }
+
+        // TEST1I: configurable species summaries for the FINAL transported state.
+        // Print even in forced mode, without enabling the full diagnostics.H.
+        if (printCFieldsBeforeClipping)
+        {
+            Info<< "TEST1I concentrations before clipping (final Picard sweep):" << nl;
+            forAll(c, i)
+            {
+                if (i == inertIndex) continue; // inert species is reconstructed later
+                Info<< "  " << c[i].name() << " min/mean/max = "
+                    << cPreMin1I[i] << " / " << cPreMean1I[i]
+                    << " / " << cPreMax1I[i] << " mol/m3" << nl;
+            }
+        }
+        if (printCFields)
+        {
+            Info<< "TEST1I concentrations after clipping (final Picard sweep):" << nl;
+            const scalar volume1I = gSum(mesh.V());
+            forAll(c, i)
+            {
+                if (i == inertIndex) continue;
+                Info<< "  " << c[i].name() << " min/mean/max = "
+                    << gMin(c[i].primitiveField()) << " / "
+                    << gSum(c[i].primitiveField()*mesh.V())/volume1I << " / "
+                    << gMax(c[i].primitiveField()) << " mol/m3" << nl;
+            }
+        }
+
         #include "YEqn.H"
-        #include "diagnostics.H"
+
+        if (printYFields)
+        {
+            Info<< "TEST1I mass fractions (final Picard sweep):" << nl;
+            const scalar volume1I = gSum(mesh.V());
+            forAll(Y, i)
+            {
+                Info<< "  " << Y[i].name() << " min/mean/max = "
+                    << gMin(Y[i].primitiveField()) << " / "
+                    << gSum(Y[i].primitiveField()*mesh.V())/volume1I << " / "
+                    << gMax(Y[i].primitiveField()) << nl;
+            }
+        }
+
+        if (runFullDiagnostics1I)
+        {
+            #include "diagnostics.H"
+        }
 
         runTime.write();
 
