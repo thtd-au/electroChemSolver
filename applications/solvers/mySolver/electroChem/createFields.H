@@ -180,14 +180,22 @@ if (controlDict.found("species"))
     }
 }
 
+// Test 1J/1K audit is opt-in, not part of normal solver output.
+
 // Potential controls
 Switch printPhiE(false);
 Switch printKappa(false);
 Switch printJDiff(false);
+Switch printGradPhiE(false);
+Switch printE(false);
+Switch printRelE(false);
 
 Switch writePhiE(false);
 Switch writeKappa(false);
 Switch writeJDiff(false);
+Switch writeGradPhiE(false);
+Switch writeE(false);
+Switch writeRelE(false);
 
 if (controlDict.found("potential"))
 {
@@ -201,6 +209,9 @@ if (controlDict.found("potential"))
         printPhiE     = d.getOrDefault<Switch>("phiE", false);
         printKappa    = d.getOrDefault<Switch>("kappa", false);
         printJDiff    = d.getOrDefault<Switch>("jDiff", false);
+        printGradPhiE = d.getOrDefault<Switch>("gradPhiE", false);
+        printE = d.getOrDefault<Switch>("E", false);
+        printRelE = d.getOrDefault<Switch>("relE", false);
     }
 
     if (potentialControlDict.found("write"))
@@ -210,6 +221,9 @@ if (controlDict.found("potential"))
         writePhiE     = d.getOrDefault<Switch>("phiE", false);
         writeKappa    = d.getOrDefault<Switch>("kappa", false);
         writeJDiff    = d.getOrDefault<Switch>("jDiff", false);
+        writeGradPhiE = d.getOrDefault<Switch>("gradPhiE", false);
+        writeE = d.getOrDefault<Switch>("E", false);
+        writeRelE = d.getOrDefault<Switch>("relE", false);
     }
 }
 
@@ -504,6 +518,14 @@ const bool diagElectrodeFluxStabilityActive =
 const bool diagChargeActive =
     diagChargePrint || diagChargeLog || diagChargeWrite;
 
+if (diagChargeActive)
+{
+    FatalIOErrorInFunction(controlDict)
+        << "Legacy diagnostics/charge output is retired; use potential.print/write.E and relE"
+        << exit(FatalIOError);
+}
+
+
 const bool diagSaturationActive =
     diagSatPrintSi
  || diagSatPrintSTot
@@ -748,52 +770,44 @@ potentialManager potentialMgr
 // ############################################ diagnostics fields  ############################################
 //
 
-const bool writeMolarCharge =
-    diagChargeWrite
- && (
-        diagChargeOutput == "molarCharge"
-     || diagChargeOutput == "both"
-    );
-
-const bool writeChargeDensity =
-    diagChargeWrite
- && (
-        diagChargeOutput == "chargeDensity"
-     || diagChargeOutput == "both"
-    );
-
-dimensionSet dimElectricCharge(0, 0, 1, 0, 0, 1, 0);
-
-volScalarField molarCharge
+// Canonical electroneutrality fields: same residual and scale as potentialMgr.
+volScalarField E
 (
-    IOobject
-    (
-        "molarCharge",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writeMolarCharge
-        ? IOobject::AUTO_WRITE
-        : IOobject::NO_WRITE
-    ),
-    mesh,
-    dimensionedScalar("zero", dimMoles/dimVolume, 0.0)
+    IOobject("E", runTime.timeName(), mesh, IOobject::NO_READ,
+        writeE ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
+    mesh, dimensionedScalar("zero", dimMoles/dimVolume, 0.0)
+);
+volScalarField relE
+(
+    IOobject("relE", runTime.timeName(), mesh, IOobject::NO_READ,
+        writeRelE ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
+    mesh, dimensionedScalar("zero", dimless, 0.0)
+);
+volVectorField gradPhiE
+(
+    IOobject("gradPhiE", runTime.timeName(), mesh, IOobject::NO_READ,
+        writeGradPhiE ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
+    mesh, dimensionedVector("zero", dimVoltage/dimLength, vector::zero)
+);
+volScalarField kappaOutput
+(
+    IOobject("kappa", runTime.timeName(), mesh, IOobject::NO_READ,
+        writeKappa ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
+    mesh, dimensionedScalar("zero", dimensionSet(-1,-3,3,0,0,2,0), 0.0)
+);
+volVectorField jDiffOutput
+(
+    IOobject("jDiff", runTime.timeName(), mesh, IOobject::NO_READ,
+        writeJDiff ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
+    mesh, dimensionedVector("zero", dimensionSet(0,-2,0,0,0,1,0), vector::zero)
 );
 
+// Legacy charge-density diagnostics remain available as a distinct physical unit.
+dimensionSet dimElectricCharge(0, 0, 1, 0, 0, 1, 0);
 volScalarField chargeDensity
 (
-    IOobject
-    (
-        "chargeDensity",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writeChargeDensity
-        ? IOobject::AUTO_WRITE
-        : IOobject::NO_WRITE
-    ),
-    mesh,
-    dimensionedScalar("zero",dimElectricCharge/dimVolume,0.0)
+    IOobject("chargeDensity", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE),
+    mesh, dimensionedScalar("zero", dimElectricCharge/dimVolume, 0.0)
 );
 
 volScalarField ionicSumField

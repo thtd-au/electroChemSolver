@@ -43,6 +43,45 @@ int main(int argc, char *argv[])
 
     // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
+    const auto updatePotentialOutput = [&]()
+    // Read-only projection of the potential model's authoritative constraint.
+    {
+        const scalarField& charge = potentialMgr.chargeResidual();
+        const scalarField& scale = potentialMgr.chargeScale();
+        forAll(charge, celli)
+        {
+            E[celli] = charge[celli];
+            relE[celli] = mag(charge[celli])/max(scale[celli], SMALL);
+        }
+        E.correctBoundaryConditions();
+        relE.correctBoundaryConditions();
+        if (writeGradPhiE || printGradPhiE)
+        {
+            gradPhiE = fvc::grad(phiE);
+        }
+        if (writeKappa || writeJDiff || printKappa || printJDiff)
+        {
+            potentialMgr.refreshDiagnosticCurrent();
+            if (writeKappa || printKappa)
+                kappaOutput = potentialMgr.conductivityField();
+            if (writeJDiff || printJDiff)
+                jDiffOutput = potentialMgr.diffusionCurrentField();
+        }
+    };
+
+    // Initial diagnostic snapshot. Never alter the initial transport/potential state.
+    potentialMgr.evaluateConstraint();
+    updatePotentialOutput();
+    if (runTime.value() == 0.0)
+    {
+        if (writeE) E.write();
+        if (writeRelE) relE.write();
+        if (writeGradPhiE) gradPhiE.write();
+        if (writeKappa) kappaOutput.write();
+        if (writeJDiff) jDiffOutput.write();
+        // phiE already exists at t=0 as the solver's MUST_READ input.
+    }
+
     Info<< "\nStarting time loop\n" << endl;
 
     while (runTime.run())
@@ -116,8 +155,7 @@ int main(int argc, char *argv[])
             ? picardDict.subDict("diagnosticMode") : dictionary();
         const bool forceFixedIterations =
             diagnosticMode.getOrDefault<bool>("forceFixedIterations", false);
-        const bool writeChargeFields1I =
-            diagnosticMode.getOrDefault<bool>("writeChargeFields", false);
+        // Legacy writeChargeFields is superseded by potential.write.E/relE.
         const bool runFullDiagnostics1I =
             diagnosticMode.getOrDefault<bool>("runFullDiagnostics", !forceFixedIterations);
         const dictionary& transportPicard = picardDict.subDict("transport");
@@ -228,61 +266,35 @@ int main(int argc, char *argv[])
                 << nl;
         }
 
-        // Optional spatial charge diagnostics, evaluated on the final transported state.
-        if (writeChargeFields1I)
+        updatePotentialOutput();
+        if (runTime.writeTime())
         {
-            const dictionary* zDict1I = reactions.found("chargeNumber")
-                ? &reactions.subDict("chargeNumber") : nullptr;
-            molarCharge = dimensionedScalar
-            (
-                "zero", molarCharge.dimensions(), 0.0
-            );
-            volScalarField relativeCharge1I
-            (
-                IOobject("relativeCharge1I", runTime.timeName(), mesh,
-                    IOobject::NO_READ, IOobject::NO_WRITE),
-                mesh,
-                dimensionedScalar("zero", dimless, 0.0)
-            );
-            scalarField ionicScale1I(mesh.nCells(), 0.0);
-            forAll(c, i)
+            label worstCell = -1;
+            scalar worstAbs = -1.0;
+            forAll(E.primitiveField(), celli)
             {
-                const scalar zi = zDict1I
-                    ? zDict1I->getOrDefault<scalar>(species[i], 0.0) : 0.0;
-                if (mag(zi) <= SMALL) continue;
-                molarCharge += zi*c[i];
-                forAll(ionicScale1I, celli)
-                {
-                    ionicScale1I[celli] += mag(zi)*c[i][celli];
-                }
+                const scalar a = mag(E[celli]);
+                if (a > worstAbs) { worstAbs = a; worstCell = celli; }
             }
-            scalar maxAbs1I = 0.0;
-            scalar maxRel1I = 0.0;
-            scalar integratedAbs1I = 0.0;
-            scalar integratedSigned1I = 0.0;
-            forAll(ionicScale1I, celli)
+            if (worstCell >= 0)
             {
-                const scalar E = molarCharge[celli];
-                const scalar rel = mag(E)/max(ionicScale1I[celli], SMALL);
-                relativeCharge1I[celli] = rel;
-                maxAbs1I = max(maxAbs1I, mag(E));
-                maxRel1I = max(maxRel1I, rel);
-                integratedAbs1I += mag(E)*mesh.V()[celli];
-                integratedSigned1I += E*mesh.V()[celli];
+                Info<< "Worst charge cell: time=" << runTime.timeName()
+                    << " cell=" << worstCell
+                    << " centre=" << mesh.C()[worstCell]
+                    << " E=" << E[worstCell]
+                    << " relE=" << relE[worstCell]
+                    << " phiE=" << phiE[worstCell] << nl;
             }
-            reduce(maxAbs1I, maxOp<scalar>());
-            reduce(maxRel1I, maxOp<scalar>());
-            reduce(integratedAbs1I, sumOp<scalar>());
-            reduce(integratedSigned1I, sumOp<scalar>());
-            Info<< "TEST1I CHARGE: maxAbs=" << maxAbs1I
-                << " mol/m3, maxRel=" << maxRel1I
-                << ", integralAbs=" << integratedAbs1I
-                << " mol, integralSigned=" << integratedSigned1I << " mol" << nl;
-            if (runTime.writeTime())
-            {
-                molarCharge.write();
-                relativeCharge1I.write();
-            }
+        }
+        if (printE || printRelE)
+        {
+            if (printE)
+                Info<< "E min/max/maxAbs [mol/m3]: "
+                    << gMin(E.primitiveField()) << " / "
+                    << gMax(E.primitiveField()) << " / "
+                    << gMax(mag(E.primitiveField())) << nl;
+            if (printRelE)
+                Info<< "relE max [-]: " << gMax(relE.primitiveField()) << nl;
         }
 
         // TEST1I: configurable species summaries for the FINAL transported state.

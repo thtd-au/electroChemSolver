@@ -3,6 +3,10 @@
 const dictionary& diffusivityDict = reactions.subDict("diffusivity");
 const bool hasChargeNumber = reactions.found("chargeNumber");
 
+// Optional OHminus face audit: scoped to the transport equation where used.
+const Switch auditOHFaces =
+    runTime.controlDict().getOrDefault<Switch>("auditOHFaces", false);
+
 surfaceScalarField gradPhiEFlux
 (
     IOobject
@@ -82,14 +86,14 @@ forAll(c, i)
     // TEST1J: OH- depletion audit. Runs BEFORE the positivity safeguard,
     // including the sweep which first produces a prohibited negative value.
     scalar minBeforeSolve1J = GREAT;
-    if (species[i] == "OHminus")
+    if (auditOHFaces && species[i] == "OHminus")
     {
         minBeforeSolve1J = gMin(ci.primitiveField());
     }
 
     ciEqn.solve(ci.name());
 
-    if (species[i] == "OHminus")
+    if (auditOHFaces && species[i] == "OHminus")
     {
         const scalar minAfterSolve1J = gMin(ci.primitiveField());
         if (minAfterSolve1J < 1.5e-4)

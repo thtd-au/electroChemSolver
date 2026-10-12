@@ -58,6 +58,11 @@ public:
     virtual bool converged() const;
     virtual void correct();
     virtual void report() const;
+    virtual const scalarField& chargeResidual() const { return chargeResidual_; }
+    virtual const scalarField& chargeScale() const { return chargeScale_; }
+    virtual void refreshDiagnosticCurrent() { updateCurrentFields(); }
+    virtual const volScalarField& conductivityField() const { return kappa_; }
+    virtual const volVectorField& diffusionCurrentField() const { return jDiff_; }
 };
 
 } // End namespace Foam

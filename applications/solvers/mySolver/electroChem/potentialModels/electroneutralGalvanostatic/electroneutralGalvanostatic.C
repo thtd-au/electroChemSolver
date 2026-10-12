@@ -52,13 +52,13 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
     converged_(false),
     kappa_
     (
-        IOobject("kappa", mesh.time().timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE),
+        IOobject("kappaModelInternal", mesh.time().timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE, false),
         mesh,
         dimensionedScalar("zero", dimensionSet(-1,-3,3,0,0,2,0), 0.0)
     ),
     jDiff_
     (
-        IOobject("jDiff", mesh.time().timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE),
+        IOobject("jDiffModelInternal", mesh.time().timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE, false),
         mesh,
         dimensionedVector("zero", dimensionSet(0,-2,0,0,0,1,0), vector::zero)
     ),
