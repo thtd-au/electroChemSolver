@@ -96,6 +96,8 @@ class reactionManager
     scalarList equilibriumAbsTol_;
     scalarList equilibriumRelTol_;
     scalar equilibriumRelaxation_;
+    bool equilibriumFBL_;
+    scalar equilibriumFractionToBoundary_;
 
     // Dense equilibrium stoichiometry N(species,equilibrium reaction).
     scalarSquareMatrix equilibriumGram_; // startup rank validation workspace/result

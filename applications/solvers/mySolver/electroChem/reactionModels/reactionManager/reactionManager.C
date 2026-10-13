@@ -2,6 +2,7 @@
 #include "IOobject.H"
 #include "dimensionedScalar.H"
 #include "DynamicList.H"
+#include "token.H"
 #include <cmath>
 
 namespace Foam
@@ -95,6 +96,7 @@ reactionManager::reactionManager
     equilibriumReactionIndices_(), kineticRates_(), lambda_(),
     transportResponse_(), residual_(), residualScale_(),
     equilibriumAbsTol_(), equilibriumRelTol_(), equilibriumRelaxation_(1.0),
+    equilibriumFBL_(false), equilibriumFractionToBoundary_(0.99),
     equilibriumGram_(0), equilibriumN_(), equilibriumEvaluated_(false),
     equilibriumConverged_(false)
 {
@@ -241,10 +243,53 @@ void reactionManager::readEquilibriumControls()
             << exit(FatalIOError);
     }
     const dictionary& eqControls = picard.subDict("equilibrium");
-    equilibriumRelaxation_ = eqControls.get<scalar>("relaxation");
-    if (equilibriumRelaxation_ <= 0 || equilibriumRelaxation_ > 1)
+    // Inspect the token so both a scalar and the FBL selector are accepted.
+    ITstream& relaxationStream = eqControls.lookup("relaxation");
+    const token relaxationToken(relaxationStream);
+    if (relaxationToken.isNumber())
     {
-        FatalIOErrorInFunction(eqControls) << "equilibrium relaxation must satisfy 0 < relaxation <= 1"
+        equilibriumRelaxation_ = relaxationToken.number();
+    }
+    else if (relaxationToken.isWord() && relaxationToken.wordToken() == "FBL")
+    {
+        equilibriumFBL_ = true;
+        equilibriumRelaxation_ =
+            eqControls.lookupOrDefault<scalar>("maxRelaxation", 1.0);
+        equilibriumFractionToBoundary_ =
+            eqControls.lookupOrDefault<scalar>("fractionToBoundary", 0.99);
+    }
+    else
+    {
+        FatalIOErrorInFunction(eqControls)
+            << "equilibrium relaxation must be a scalar or FBL"
+            << exit(FatalIOError);
+    }
+    if (!relaxationStream.eof())
+    {
+        FatalIOErrorInFunction(eqControls)
+            << "equilibrium relaxation must contain exactly one value"
+            << exit(FatalIOError);
+    }
+    if (!std::isfinite(equilibriumRelaxation_)
+     || equilibriumRelaxation_ <= 0 || equilibriumRelaxation_ > 1)
+    {
+        FatalIOErrorInFunction(eqControls)
+            << "equilibrium relaxation (or FBL maxRelaxation) must satisfy 0 < value <= 1"
+            << exit(FatalIOError);
+    }
+    if (!std::isfinite(equilibriumFractionToBoundary_)
+     || equilibriumFractionToBoundary_ <= 0
+     || equilibriumFractionToBoundary_ >= 1)
+    {
+        FatalIOErrorInFunction(eqControls)
+            << "fractionToBoundary must satisfy 0 < value < 1"
+            << exit(FatalIOError);
+    }
+    if (!equilibriumFBL_
+     && (eqControls.found("maxRelaxation") || eqControls.found("fractionToBoundary")))
+    {
+        FatalIOErrorInFunction(eqControls)
+            << "maxRelaxation and fractionToBoundary require relaxation FBL"
             << exit(FatalIOError);
     }
 
@@ -272,7 +317,10 @@ void reactionManager::readEquilibriumControls()
     const wordList entries = eqControls.toc();
     forAll(entries, i)
     {
-        if (entries[i] == "relaxation" || !eqControls.isDict(entries[i])) continue;
+        if (entries[i] == "relaxation"
+         || entries[i] == "maxRelaxation"
+         || entries[i] == "fractionToBoundary"
+         || !eqControls.isDict(entries[i])) continue;
         bool found = false;
         forAll(equilibriumReactionIndices_, r)
             found = found || reactions_[equilibriumReactionIndices_[r]].name == entries[i];
@@ -592,9 +640,48 @@ void reactionManager::correctEquilibrium()
                 << exit(FatalError);
         }
 
+        scalar alpha = equilibriumRelaxation_;
+        if (equilibriumFBL_)
+        {
+            // One factor for the coupled step: deltaC = S*N*deltaLambda.
+            // Limit only species moving towards the c=0 boundary.
+            forAll(species_, i)
+            {
+                if (i == inertIndex_) continue;
+                scalar deltaC = 0.0;
+                forAll(delta, r)
+                    deltaC += equilibriumN_[i][r]*delta[r];
+                deltaC *= transportResponse_[i][celli];
+                const scalar ci = c_[i][celli];
+                if (!std::isfinite(deltaC) || !std::isfinite(ci) || ci < 0)
+                {
+                    FatalErrorInFunction
+                        << "Invalid FBL concentration response for " << species_[i]
+                        << " at cell " << celli << ": c=" << ci
+                        << ", deltaC=" << deltaC << exit(FatalError);
+                }
+                if (deltaC < 0)
+                {
+                    // Compute the ratio only if the current cap would violate
+                    // the safety margin; this also avoids a huge c/(-deltaC).
+                    const scalar available = equilibriumFractionToBoundary_*ci;
+                    if (alpha*(-deltaC) > available)
+                        alpha = available/(-deltaC);
+                }
+            }
+            if (alpha <= 0)
+            {
+                FatalErrorInFunction
+                    << "FBL equilibrium step is blocked at cell " << celli
+                    << ": a zero concentration has a negative predicted increment. "
+                    << "No positive fraction-to-boundary step is feasible."
+                    << exit(FatalError);
+            }
+        }
+
         forAll(lambda_, r)
         {
-            lambda_[r][celli] += equilibriumRelaxation_*delta[r];
+            lambda_[r][celli] += alpha*delta[r];
             if (!std::isfinite(lambda_[r][celli]))
                 FatalErrorInFunction << "Non-finite lambda for "
                     << reactions_[equilibriumReactionIndices_[r]].name << " at cell " << celli
