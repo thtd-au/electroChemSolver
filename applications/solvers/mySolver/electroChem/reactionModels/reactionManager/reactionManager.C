@@ -228,6 +228,7 @@ void reactionManager::readReactions()
 
 void reactionManager::readEquilibriumControls()
 {
+    if (!nEquilibriumReactions()) return;
     if (!mesh_.solutionDict().found("Picard"))
     {
         FatalIOErrorInFunction(mesh_.solutionDict())
@@ -389,6 +390,7 @@ void reactionManager::buildAndValidateEquilibriumStoichiometry()
 
 void reactionManager::resetEquilibriumSources()
 {
+    if (!nEquilibriumReactions()) return;
     forAll(lambda_, r) lambda_[r] = 0.0;
     equilibriumEvaluated_ = false;
     equilibriumConverged_ = false;
@@ -448,6 +450,7 @@ tmp<volScalarField> reactionManager::source(const label speciesI) const
 
 void reactionManager::setTransportResponse(const label speciesI, const fvScalarMatrix& cEqn)
 {
+    if (!nEquilibriumReactions()) return;
     if (speciesI < 0 || speciesI >= species_.size() || speciesI == inertIndex_)
         FatalErrorInFunction << "Invalid active species index " << speciesI << exit(FatalError);
 
@@ -481,6 +484,7 @@ bool reactionManager::cellEquilibriumConverged(const label celli) const
 
 void reactionManager::evaluateEquilibrium()
 {
+    if (!nEquilibriumReactions()) return;
     scalarField concentrations(species_.size(), 0.0), nu(species_.size(), 0.0), dFdc(species_.size(), 0.0);
     equilibriumConverged_ = true;
 
@@ -513,6 +517,7 @@ void reactionManager::evaluateEquilibrium()
 
 bool reactionManager::equilibriumConverged() const
 {
+    if (!nEquilibriumReactions()) return true;
     if (!equilibriumEvaluated_)
         FatalErrorInFunction << "equilibriumConverged() called before evaluateEquilibrium()"
             << exit(FatalError);
@@ -522,6 +527,7 @@ bool reactionManager::equilibriumConverged() const
 
 void reactionManager::correctEquilibrium()
 {
+    if (!nEquilibriumReactions()) return;
     if (!equilibriumEvaluated_)
         FatalErrorInFunction << "correctEquilibrium() called before evaluateEquilibrium()"
             << exit(FatalError);
@@ -587,6 +593,7 @@ void reactionManager::correctEquilibrium()
 
 void reactionManager::reportEquilibrium() const
 {
+    if (!nEquilibriumReactions()) return;
     if (!equilibriumEvaluated_)
     {
         Info<< "Equilibrium residuals: no transported state currently evaluated" << nl;

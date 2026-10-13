@@ -187,8 +187,8 @@ void galvanostaticMolarFlux::updateCoeffs()
     const dictionary& potentialDict =
         electroChemistry.subDict("potential");
 
-    const scalar currentDensity =
-        potentialDict.get<scalar>("appliedCurrentDensity");
+    const bool potentialActive = potentialDict.get<word>("model") != "none";
+    const scalar currentDensity = potentialDict.get<scalar>("appliedCurrentDensity");
 
     const scalar T = electroChemistry.get<scalar>("temperature");
     const scalar F = electroChemistry.get<scalar>("FaradayConstant");
@@ -208,51 +208,27 @@ void galvanostaticMolarFlux::updateCoeffs()
             << exit(FatalIOError);
     }
 
-    if (!mesh.foundObject<volScalarField>("phiE"))
-    {
-        FatalErrorInFunction
-            << "Required field phiE was not found in the mesh registry"
-            << exit(FatalError);
-    }
-
-    const volScalarField& phiE =
-        mesh.lookupObject<volScalarField>("phiE");
-
-    const label patchi = patch().index();
-    const fvPatchScalarField& phiEPatch =
-        phiE.boundaryField()[patchi];
-
+    // Electrode stoichiometry always comes from the matching phiE patch.
+    // In isolation mode only the metadata is consumed, never its gradient.
+    const volScalarField& phiE = mesh.lookupObject<volScalarField>("phiE");
+    const fvPatchScalarField& phiEPatch = phiE.boundaryField()[patch().index()];
     if (!isA<galvanostaticPotentialFlux>(phiEPatch))
     {
         FatalErrorInFunction
-            << "Patch " << patch().name() << " uses galvanostaticMolarFlux "
-            << "for field " << internalField().name() << ", but the "
-            << "corresponding phiE patch has type " << phiEPatch.type()
-            << "." << nl
-            << "The phiE patch must use galvanostaticPotentialFlux so the "
-            << "electrode electronStoichCoeff has a single source of truth."
+            << "galvanostaticMolarFlux requires galvanostaticPotentialFlux "
+            << "on the matching phiE patch " << patch().name()
             << exit(FatalError);
     }
-
     const galvanostaticPotentialFlux& potentialFluxBC =
         refCast<const galvanostaticPotentialFlux>(phiEPatch);
-
-    const scalar electronStoichCoeff =
-        potentialFluxBC.electronStoichCoeff();
-
+    const scalar electronStoichCoeff = potentialFluxBC.electronStoichCoeff();
+    scalarField snGradPhiE(patch().size(), 0.0);
+    if (potentialActive) snGradPhiE = potentialFluxBC.gradient();
     if (mag(electronStoichCoeff) <= SMALL)
     {
-        FatalErrorInFunction
-            << "galvanostaticPotentialFlux on patch " << patch().name()
-            << " has zero electronStoichCoeff"
-            << exit(FatalError);
+        FatalErrorInFunction << "Zero electrode electronStoichCoeff on patch "
+            << patch().name() << exit(FatalError);
     }
-
-    // Picard-lagged electrode coupling:
-    // consume the gradient already stored by galvanostaticPotentialFlux.
-    // Do not call phiEPatch.snGrad() here, since that may trigger
-    // galvanostaticPotentialFlux::updateCoeffs() recursively.
-    const scalarField& snGradPhiE = potentialFluxBC.gradient();
     const scalarField& delta = patch().deltaCoeffs();
 
     scalarField beta(patch().size(), 0.0);

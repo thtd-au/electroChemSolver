@@ -174,7 +174,7 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
     }
     else
     {
-        Info<< "Test1F: fixed-potential reservoir detected; initial gauge shift disabled" << nl;
+        Info<< "Fixed-potential boundary detected; initial gauge shift disabled" << nl;
     }
 
 }
@@ -199,20 +199,8 @@ void electroneutralGalvanostatic::selectReferenceCell()
             << "referencePatch " << referencePatchName_ << " has no faces"
             << exit(FatalError);
     }
-    // TEST 1C: optional gauge-location-only A/B override.
-    const label overrideCell = potentialDict_.getOrDefault<label>
-    (
-        "test1CReferenceCell", -1
-    );
-    if (overrideCell >= mesh_.nCells())
-    {
-        FatalIOErrorInFunction(potentialDict_)
-            << "test1CReferenceCell out of range: " << overrideCell
-            << exit(FatalIOError);
-    }
-    referenceCell_ = overrideCell >= 0 ? overrideCell : localCandidate;
-    Info<< "Test1C selected reference cell=" << referenceCell_
-        << " (patch candidate=" << localCandidate << ")" << nl;
+    referenceCell_ = localCandidate;
+
 }
 
 void electroneutralGalvanostatic::updateCurrentFields()
@@ -249,10 +237,10 @@ void electroneutralGalvanostatic::updateCurrentFields()
     jDiffFlux_() = fvc::interpolate(jDiff_) & mesh_.Sf();
 
 
-    // Preserve the Test 1F species-face diffusion discretization.
+    // Use species-face diffusion discretization consistent with transport.
     surfaceScalarField jDiffSpeciesFaces
     (
-        IOobject("jDiffSpeciesFaces1I", mesh_.time().timeName(), mesh_,
+        IOobject("jDiffSpeciesFaces", mesh_.time().timeName(), mesh_,
             IOobject::NO_READ, IOobject::NO_WRITE, false),
         mesh_, dimensionedScalar("zero", jDiffFlux_().dimensions(), 0.0)
     );

@@ -151,13 +151,6 @@ int main(int argc, char *argv[])
         // --- Coupled electrochemical Picard loop
         const dictionary& picardDict = mesh.solutionDict().subDict("Picard");
         const label maxPicardIter = picardDict.get<label>("maxIter");
-        const dictionary diagnosticMode = picardDict.found("diagnosticMode")
-            ? picardDict.subDict("diagnosticMode") : dictionary();
-        const bool forceFixedIterations =
-            diagnosticMode.getOrDefault<bool>("forceFixedIterations", false);
-        // Legacy writeChargeFields is superseded by potential.write.E/relE.
-        const bool runFullDiagnostics1I =
-            diagnosticMode.getOrDefault<bool>("runFullDiagnostics", !forceFixedIterations);
         const dictionary& transportPicard = picardDict.subDict("transport");
         const scalar negativeConcentrationTolerance = transportPicard.get<scalar>("negativeConcentrationTolerance");
 
@@ -182,9 +175,9 @@ int main(int argc, char *argv[])
         reactionMgr.resetEquilibriumSources();
 
         // Retained across cEqn.H include scope and all Picard sweeps.
-        scalarList cPreMin1I(c.size(), 0.0);
-        scalarList cPreMean1I(c.size(), 0.0);
-        scalarList cPreMax1I(c.size(), 0.0);
+        scalarList cPreMin(c.size(), 0.0);
+        scalarList cPreMean(c.size(), 0.0);
+        scalarList cPreMax(c.size(), 0.0);
 
         bool electroChemConverged = false;
         label testedPicardStates = 0;
@@ -213,7 +206,7 @@ int main(int argc, char *argv[])
             reactionMgr.reportEquilibrium();
             potentialMgr.report();
 
-            if (!forceFixedIterations && equilibriumOK && electroneutralityOK)
+            if (equilibriumOK && electroneutralityOK)
             {
                 electroChemConverged = true;
                 break;
@@ -241,7 +234,7 @@ int main(int argc, char *argv[])
             // next complete cEqn transport before either constraint is tested.
         }
 
-        if (!electroChemConverged && !forceFixedIterations)
+        if (!electroChemConverged)
         {
             Info<< nl
                 << "Final electrochemical constraint state after "
@@ -257,35 +250,7 @@ int main(int argc, char *argv[])
                 << exit(FatalError);
         }
 
-        if (forceFixedIterations)
-        {
-            Info<< "TEST1I FORCED STATE (NOT CONVERGED/VALIDATED): time="
-                << runTime.timeName() << ", sweeps=" << testedPicardStates
-                << ", equilibriumOK=" << reactionMgr.equilibriumConverged()
-                << ", electroneutralityOK=" << potentialMgr.converged()
-                << nl;
-        }
-
         updatePotentialOutput();
-        if (runTime.writeTime())
-        {
-            label worstCell = -1;
-            scalar worstAbs = -1.0;
-            forAll(E.primitiveField(), celli)
-            {
-                const scalar a = mag(E[celli]);
-                if (a > worstAbs) { worstAbs = a; worstCell = celli; }
-            }
-            if (worstCell >= 0)
-            {
-                Info<< "Worst charge cell: time=" << runTime.timeName()
-                    << " cell=" << worstCell
-                    << " centre=" << mesh.C()[worstCell]
-                    << " E=" << E[worstCell]
-                    << " relE=" << relE[worstCell]
-                    << " phiE=" << phiE[worstCell] << nl;
-            }
-        }
         if (printE || printRelE)
         {
             if (printE)
@@ -297,52 +262,20 @@ int main(int argc, char *argv[])
                 Info<< "relE max [-]: " << gMax(relE.primitiveField()) << nl;
         }
 
-        // TEST1I: configurable species summaries for the FINAL transported state.
-        // Print even in forced mode, without enabling the full diagnostics.H.
+        // Optional summary of the final transport state before clipping.
         if (printCFieldsBeforeClipping)
         {
-            Info<< "TEST1I concentrations before clipping (final Picard sweep):" << nl;
+            Info<< "Concentrations before clipping (final Picard sweep):" << nl;
             forAll(c, i)
             {
                 if (i == inertIndex) continue; // inert species is reconstructed later
                 Info<< "  " << c[i].name() << " min/mean/max = "
-                    << cPreMin1I[i] << " / " << cPreMean1I[i]
-                    << " / " << cPreMax1I[i] << " mol/m3" << nl;
+                    << cPreMin[i] << " / " << cPreMean[i]
+                    << " / " << cPreMax[i] << " mol/m3" << nl;
             }
         }
-        if (printCFields)
-        {
-            Info<< "TEST1I concentrations after clipping (final Picard sweep):" << nl;
-            const scalar volume1I = gSum(mesh.V());
-            forAll(c, i)
-            {
-                if (i == inertIndex) continue;
-                Info<< "  " << c[i].name() << " min/mean/max = "
-                    << gMin(c[i].primitiveField()) << " / "
-                    << gSum(c[i].primitiveField()*mesh.V())/volume1I << " / "
-                    << gMax(c[i].primitiveField()) << " mol/m3" << nl;
-            }
-        }
-
         #include "YEqn.H"
-
-        if (printYFields)
-        {
-            Info<< "TEST1I mass fractions (final Picard sweep):" << nl;
-            const scalar volume1I = gSum(mesh.V());
-            forAll(Y, i)
-            {
-                Info<< "  " << Y[i].name() << " min/mean/max = "
-                    << gMin(Y[i].primitiveField()) << " / "
-                    << gSum(Y[i].primitiveField()*mesh.V())/volume1I << " / "
-                    << gMax(Y[i].primitiveField()) << nl;
-            }
-        }
-
-        if (runFullDiagnostics1I)
-        {
-            #include "diagnostics.H"
-        }
+        #include "diagnostics.H"
 
         runTime.write();
 

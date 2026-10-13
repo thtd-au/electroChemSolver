@@ -102,6 +102,8 @@ public:
         const dimensionedScalar& F
     );
 
+    bool active() const { return model_->type() != "none"; }
+
     void evaluateConstraint() { model_->evaluateConstraint(); }
     bool converged() const { return model_->converged(); }
     void correct() { model_->correct(); }

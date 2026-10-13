@@ -180,8 +180,6 @@ if (controlDict.found("species"))
     }
 }
 
-// Test 1J/1K audit is opt-in, not part of normal solver output.
-
 // Potential controls
 Switch printPhiE(false);
 Switch printKappa(false);
@@ -735,7 +733,11 @@ if (!electroChemistry.found("potential"))
         << exit(FatalIOError);
 }
 
-Info<< "Reading electric potential field phiE\n" << endl;
+const bool potentialActive =
+    electroChemistry.subDict("potential").get<word>("model") != "none";
+
+Info<< "Potential model: "
+    << electroChemistry.subDict("potential").get<word>("model") << nl;
 
 volScalarField phiE
 (
@@ -749,6 +751,13 @@ volScalarField phiE
     ),
     mesh
 );
+
+if (!potentialActive)
+{
+    // Preserve patch types and electrode metadata while clearing the field.
+    phiE = dimensionedScalar("zero", phiE.dimensions(), 0.0);
+    phiE.correctBoundaryConditions();
+}
 
 // potentialManager performs runtime selection from electroChemistry/potential/model.
 // The selected model owns electroneutrality evaluation and potential correction.

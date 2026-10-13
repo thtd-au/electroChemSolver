@@ -312,8 +312,7 @@
 
 // ############################################################ Species state ############################################################
 
-    // PotentialReaction never clips concentrations.  Diagnostics therefore
-    // report the single accepted post-convergence concentration state.
+    // Report the accepted post-convergence concentration state.
     if (printCFields)
     {
         Info<< "Concentration fields:" << nl;
@@ -421,9 +420,15 @@
                     IOobject::NO_READ,
                     IOobject::NO_WRITE
                 ),
-                fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)
-              * (fvc::snGrad(phiE)*mesh.magSf())
+                mesh,
+                dimensionedScalar("zero", dimMoles/dimTime, 0.0)
             );
+            if (potentialMgr.active())
+            {
+                migrationFlux = fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)
+                    * (fvc::snGrad(phiE)*mesh.magSf());
+            }
+
 
             volScalarField advTerm
             (
@@ -590,8 +595,8 @@
 
                 const fvPatchScalarField& phiEp =
                     phiE.boundaryField()[patchi];
-                tmp<scalarField> tsnGradPhiE = phiEp.snGrad();
-                const scalarField& snGradPhiE = tsnGradPhiE();
+                scalarField snGradPhiE(phiEp.size(), 0.0);
+                if (potentialMgr.active()) snGradPhiE = phiEp.snGrad();
 
                 forAll(cp, facei)
                 {
@@ -793,8 +798,8 @@
 
                 const fvPatchScalarField& phiEp =
                     phiE.boundaryField()[patchi];
-                tmp<scalarField> tsnGradPhiE = phiEp.snGrad();
-                const scalarField& snGradPhiE = tsnGradPhiE();
+                scalarField snGradPhiE(phiEp.size(), 0.0);
+                if (potentialMgr.active()) snGradPhiE = phiEp.snGrad();
 
                 scalarField B(patch.size(), 0.0);
                 scalarField robinSafety(patch.size(), 0.0);

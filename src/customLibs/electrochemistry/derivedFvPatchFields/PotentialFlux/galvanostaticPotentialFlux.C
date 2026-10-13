@@ -141,6 +141,15 @@ void galvanostaticPotentialFlux::updateCoeffs()
     const dictionary& potentialDict =
         electroChemistry.subDict("potential");
 
+    if (potentialDict.get<word>("model") == "none")
+    {
+        // Keep electronStoichCoeff available to the species flux BC without
+        // computing electric fields or requiring conductivity/current fields.
+        gradient() = 0.0;
+        fixedGradientFvPatchScalarField::updateCoeffs();
+        return;
+    }
+
     const scalar currentDensity =
         potentialDict.get<scalar>
         (
