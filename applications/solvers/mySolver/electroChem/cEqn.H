@@ -25,6 +25,8 @@ if (potentialMgr.active())
 // Kinetic rates are frozen for the complete species sweep and are updated
 // exactly once by electroChem.C before this include is entered.
 
+reactionMgr.beginTransportDiagnostics();
+
 forAll(c, i)
 {
     if (i == inertIndex)
@@ -90,10 +92,21 @@ forAll(c, i)
     // S_i = V/aP_i must come from the final constrained transport matrix.
     reactionMgr.setTransportResponse(i, ciEqn);
 
-    ciEqn.solve(ci.name());
+    const auto transportPerformance = ciEqn.solve(ci.name());
+    if (reactionMgr.equilibriumDiagnostics())
+    {
+        Pout<< "EQDIAG linearSolve species=" << species[i]
+            << " initialResidual=" << transportPerformance.initialResidual()
+            << " finalResidual=" << transportPerformance.finalResidual()
+            << " iterations=" << transportPerformance.nIterations()
+            << " converged=" << transportPerformance.converged() << nl;
+    }
 
     fvOptions.correct(ci);
     ci.correctBoundaryConditions();
+
+    // Inspect before clipping or the existing fatal negativity check.
+    reactionMgr.reportTransportDiagnostics(i);
 
     if (printCFieldsBeforeClipping)
     {

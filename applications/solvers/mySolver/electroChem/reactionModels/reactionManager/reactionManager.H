@@ -9,6 +9,7 @@
 #include "runTimeSelectionTables.H"
 #include "scalarMatrices.H"
 #include "volFields.H"
+#include "boolList.H"
 
 namespace Foam
 {
@@ -98,6 +99,29 @@ class reactionManager
     scalar equilibriumRelaxation_;
     bool equilibriumFBL_;
     scalar equilibriumFractionToBoundary_;
+    word equilibriumResponse_;
+    dictionary responseSolver_;
+    PtrList<fvScalarMatrix> transportMatrices_;
+    label coupledRestart_;
+    label coupledMaxIter_;
+    scalar coupledRelTol_;
+    scalar coupledAbsTol_;
+    label coupledMaxBacktracks_;
+    scalar coupledReduction_;
+    scalar coupledSufficientDecrease_;
+    List<scalarField> transportMatrixResponse(const List<scalarField>& direction) const;
+    List<scalarField> coupledNewtonDirection() const;
+    void applyTransportMatrixCorrection(const List<scalarField>& direction);
+    bool equilibriumDiagnostics_;
+    bool diagnosticStepValid_;
+    List<scalarField> diagnosticBefore_;
+    List<scalarField> diagnosticDeltaC_;
+    List<scalarField> diagnosticResponse_;
+    List<scalarField> diagnosticKineticBefore_;
+    List<scalarField> diagnosticDeltaLambda_;
+    scalarField diagnosticAlpha_;
+    labelList diagnosticLimiter_;
+    boolList diagnosticTransported_;
 
     // Dense equilibrium stoichiometry N(species,equilibrium reaction).
     scalarSquareMatrix equilibriumGram_; // startup rank validation workspace/result
@@ -159,6 +183,9 @@ public:
     bool equilibriumConverged() const;
     void correctEquilibrium();
     void reportEquilibrium() const;
+    bool equilibriumDiagnostics() const { return equilibriumDiagnostics_; }
+    void beginTransportDiagnostics();
+    void reportTransportDiagnostics(const label speciesI);
 
     label nKineticReactions() const { return kineticReactionIndices_.size(); }
     label nEquilibriumReactions() const { return equilibriumReactionIndices_.size(); }

@@ -57,6 +57,7 @@ void fastEquilibriumReaction::equilibriumResidualAndJacobian
     reactantTerm *= K_;
     residual = productTerm - reactantTerm;
     dFdc.setSize(c.size(), 0.0);
+    dFdc = 0.0;
 
     // Product-form derivatives: intentionally avoids P/c and R/c.
     forAll(nu, i)

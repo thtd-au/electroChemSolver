@@ -3,6 +3,8 @@
 #include "dimensionedScalar.H"
 #include "DynamicList.H"
 #include "token.H"
+#include "equilibriumKrylov.H"
+#include "PstreamReduceOps.H"
 #include <cmath>
 
 namespace Foam
@@ -97,6 +99,15 @@ reactionManager::reactionManager
     transportResponse_(), residual_(), residualScale_(),
     equilibriumAbsTol_(), equilibriumRelTol_(), equilibriumRelaxation_(1.0),
     equilibriumFBL_(false), equilibriumFractionToBoundary_(0.99),
+    equilibriumResponse_("diagonal"), responseSolver_(), transportMatrices_(),
+    coupledRestart_(20), coupledMaxIter_(100),
+    coupledRelTol_(1e-6), coupledAbsTol_(1e-12),
+    coupledMaxBacktracks_(30), coupledReduction_(0.5),
+    coupledSufficientDecrease_(1e-4),
+    equilibriumDiagnostics_(false), diagnosticStepValid_(false),
+    diagnosticBefore_(), diagnosticDeltaC_(), diagnosticResponse_(), diagnosticKineticBefore_(),
+    diagnosticDeltaLambda_(), diagnosticAlpha_(), diagnosticLimiter_(),
+    diagnosticTransported_(),
     equilibriumGram_(0), equilibriumN_(), equilibriumEvaluated_(false),
     equilibriumConverged_(false)
 {
@@ -243,6 +254,51 @@ void reactionManager::readEquilibriumControls()
             << exit(FatalIOError);
     }
     const dictionary& eqControls = picard.subDict("equilibrium");
+    equilibriumResponse_ =
+        eqControls.lookupOrDefault<word>("response", "diagonal");
+    if (equilibriumResponse_ != "diagonal"
+     && equilibriumResponse_ != "transportMatrix"
+     && equilibriumResponse_ != "coupledNewton")
+    {
+        FatalIOErrorInFunction(eqControls)
+            << "response must be diagonal, transportMatrix, or coupledNewton"
+            << exit(FatalIOError);
+    }
+    if (equilibriumResponse_ != "diagonal")
+    {
+        responseSolver_ = eqControls.subDict("responseSolver");
+        transportMatrices_.setSize(species_.size());
+    }
+    if (equilibriumResponse_ == "coupledNewton")
+    {
+        const dictionary& k = eqControls.subDict("coupledSolver");
+        coupledRestart_ = k.lookupOrDefault<label>("restart", 20);
+        coupledMaxIter_ = k.lookupOrDefault<label>("maxIter", 100);
+        coupledRelTol_ = k.lookupOrDefault<scalar>("relTol", 1e-6);
+        coupledAbsTol_ = k.lookupOrDefault<scalar>("absTol", 1e-12);
+        coupledMaxBacktracks_ = k.lookupOrDefault<label>("maxBacktracks", 30);
+        coupledReduction_ = k.lookupOrDefault<scalar>("reduction", 0.5);
+        coupledSufficientDecrease_ =
+            k.lookupOrDefault<scalar>("sufficientDecrease", 1e-4);
+        if (coupledRestart_ < 1 || coupledMaxIter_ < 1
+         || !std::isfinite(coupledRelTol_) || coupledRelTol_ <= 0
+         || coupledRelTol_ >= 1
+         || !std::isfinite(coupledAbsTol_) || coupledAbsTol_ <= 0)
+            FatalIOErrorInFunction(k)
+                << "Require restart,maxIter >= 1, 0 < relTol < 1, absTol > 0"
+                << exit(FatalIOError);
+        if (coupledMaxBacktracks_ < 0
+         || !std::isfinite(coupledReduction_)
+         || coupledReduction_ <= 0 || coupledReduction_ >= 1
+         || !std::isfinite(coupledSufficientDecrease_)
+         || coupledSufficientDecrease_ <= 0
+         || coupledSufficientDecrease_ >= 1)
+            FatalIOErrorInFunction(k)
+                << "Require maxBacktracks>=0, 0<reduction,sufficientDecrease<1"
+                << exit(FatalIOError);
+    }
+    equilibriumDiagnostics_ =
+        eqControls.lookupOrDefault<bool>("diagnostics", false);
     // Inspect the token so both a scalar and the FBL selector are accepted.
     ITstream& relaxationStream = eqControls.lookup("relaxation");
     const token relaxationToken(relaxationStream);
@@ -318,6 +374,8 @@ void reactionManager::readEquilibriumControls()
     forAll(entries, i)
     {
         if (entries[i] == "relaxation"
+         || entries[i] == "responseSolver"
+         || entries[i] == "coupledSolver"
          || entries[i] == "maxRelaxation"
          || entries[i] == "fractionToBoundary"
          || !eqControls.isDict(entries[i])) continue;
@@ -438,6 +496,7 @@ void reactionManager::buildAndValidateEquilibriumStoichiometry()
 
 void reactionManager::resetEquilibriumSources()
 {
+    diagnosticStepValid_ = false;
     if (!nEquilibriumReactions()) return;
     forAll(lambda_, r) lambda_[r] = 0.0;
     equilibriumEvaluated_ = false;
@@ -518,6 +577,15 @@ void reactionManager::setTransportResponse(const label speciesI, const fvScalarM
     if (!nEquilibriumReactions()) return;
     if (speciesI < 0 || speciesI >= species_.size() || speciesI == inertIndex_)
         FatalErrorInFunction << "Invalid active species index " << speciesI << exit(FatalError);
+
+    if (equilibriumResponse_ != "diagonal")
+    {
+        bool participating = false;
+        forAll(equilibriumN_[speciesI], r)
+            participating = participating || equilibriumN_[speciesI][r] != 0;
+        if (participating)
+            transportMatrices_.set(speciesI, new fvScalarMatrix(cEqn));
+    }
 
     const scalarField& aP = cEqn.diag();
     scalarField& S = transportResponse_[speciesI];
@@ -600,9 +668,50 @@ void reactionManager::correctEquilibrium()
     const label ne = nEquilibriumReactions();
     if (!ne || equilibriumConverged_) return;
 
+    if (equilibriumDiagnostics_)
+    {
+        diagnosticBefore_.setSize(species_.size());
+        diagnosticDeltaC_.setSize(species_.size());
+        diagnosticResponse_ = transportResponse_;
+        diagnosticKineticBefore_.setSize(species_.size());
+        diagnosticDeltaLambda_.setSize(ne);
+        diagnosticAlpha_.setSize(mesh_.nCells(), 0.0);
+        diagnosticLimiter_.setSize(mesh_.nCells(), -1);
+        diagnosticTransported_.setSize(species_.size(), false);
+        forAll(species_, i)
+        {
+            diagnosticBefore_[i] = c_[i].primitiveField();
+            diagnosticDeltaC_[i].setSize(mesh_.nCells(), 0.0);
+            diagnosticDeltaC_[i] = 0.0;
+            diagnosticKineticBefore_[i].setSize(mesh_.nCells(), 0.0);
+            diagnosticKineticBefore_[i] = 0.0;
+            forAll(kineticReactionIndices_, k)
+                diagnosticKineticBefore_[i] +=
+                    reactionStoich(reactions_[kineticReactionIndices_[k]], i)
+                   *kineticRates_[k];
+        }
+        forAll(diagnosticDeltaLambda_, r)
+        {
+            diagnosticDeltaLambda_[r].setSize(mesh_.nCells(), 0.0);
+            diagnosticDeltaLambda_[r] = 0.0;
+        }
+        diagnosticStepValid_ = true;
+    }
+
+    if (equilibriumResponse_ == "coupledNewton")
+    {
+        applyTransportMatrixCorrection(coupledNewtonDirection());
+        equilibriumEvaluated_ = false;
+        equilibriumConverged_ = false;
+        return;
+    }
+
     scalarField concentrations(species_.size(), 0.0), nu(species_.size(), 0.0), dFdc(species_.size(), 0.0);
     scalarSquareMatrix J(ne);
     scalarField rhs(ne), delta(ne);
+    List<scalarField> direction(ne);
+    if (equilibriumResponse_ == "transportMatrix")
+        forAll(direction, r) direction[r].setSize(mesh_.nCells(), 0.0);
 
     forAll(mesh_.V(), celli)
     {
@@ -640,7 +749,16 @@ void reactionManager::correctEquilibrium()
                 << exit(FatalError);
         }
 
+        if (equilibriumResponse_ == "transportMatrix")
+        {
+            // Keep the existing local Newton direction, but predict its
+            // concentration response with the whole transport matrix below.
+            forAll(delta, r) direction[r][celli] = delta[r];
+            continue;
+        }
+
         scalar alpha = equilibriumRelaxation_;
+        label limitingSpecies = -1;
         if (equilibriumFBL_)
         {
             // One factor for the coupled step: deltaC = S*N*deltaLambda.
@@ -666,7 +784,10 @@ void reactionManager::correctEquilibrium()
                     // the safety margin; this also avoids a huge c/(-deltaC).
                     const scalar available = equilibriumFractionToBoundary_*ci;
                     if (alpha*(-deltaC) > available)
+                    {
                         alpha = available/(-deltaC);
+                        limitingSpecies = i;
+                    }
                 }
             }
             if (alpha <= 0)
@@ -676,6 +797,21 @@ void reactionManager::correctEquilibrium()
                     << ": a zero concentration has a negative predicted increment. "
                     << "No positive fraction-to-boundary step is feasible."
                     << exit(FatalError);
+            }
+        }
+
+        if (equilibriumDiagnostics_)
+        {
+            diagnosticAlpha_[celli] = alpha;
+            diagnosticLimiter_[celli] = limitingSpecies;
+            forAll(delta, r)
+                diagnosticDeltaLambda_[r][celli] = alpha*delta[r];
+            forAll(species_, i)
+            {
+                scalar dc = 0.0;
+                forAll(delta, r) dc += equilibriumN_[i][r]*delta[r];
+                diagnosticDeltaC_[i][celli] =
+                    alpha*transportResponse_[i][celli]*dc;
             }
         }
 
@@ -689,9 +825,441 @@ void reactionManager::correctEquilibrium()
         }
     }
 
+    if (equilibriumResponse_ == "transportMatrix")
+        applyTransportMatrixCorrection(direction);
+
     // The corrected lambda has not yet been transported/tested.
     equilibriumEvaluated_ = false;
     equilibriumConverged_ = false;
+}
+
+
+List<scalarField> reactionManager::coupledNewtonDirection() const
+{
+    const label ne = nEquilibriumReactions(), nc = mesh_.nCells();
+    typedef std::vector<scalar> Vector;
+    List<List<scalarField>> derivative(ne);
+    List<scalarSquareMatrix> preconditioner(nc);
+    Vector b(ne*nc, 0.0);
+    scalarField concentrations(species_.size()), nu(species_.size()), dFdc;
+    forAll(derivative, r)
+    {
+        derivative[r].setSize(species_.size());
+        forAll(species_, i) derivative[r][i].setSize(nc, 0.0);
+    }
+    // Include ALL cells, even locally converged ones: neighbour corrections
+    // can perturb their equilibrium residuals.
+    for (label celli=0; celli<nc; ++celli)
+    {
+        preconditioner[celli].setSize(ne);
+        preconditioner[celli] = scalar(0);
+        forAll(c_, i) concentrations[i] = c_[i][celli];
+        forAll(equilibriumReactionIndices_, r)
+        {
+            const reactionRecord& rec = reactions_[equilibriumReactionIndices_[r]];
+            nu = 0.0;
+            forAll(rec.speciesIndices, j) nu[rec.speciesIndices[j]] = rec.stoichCoeffs[j];
+            scalar F=0, P=0, KR=0;
+            rec.model->equilibriumResidualAndJacobian
+                (celli, concentrations, nu, F, dFdc, P, KR);
+            const scalar scale = residualScale_[r][celli];
+            b[r*nc+celli] = -F/scale;
+            forAll(species_, i)
+            {
+                if (!std::isfinite(dFdc[i]))
+                    FatalErrorInFunction << "Non-finite coupled derivative at cell "
+                        << celli << exit(FatalError);
+                derivative[r][i][celli] = dFdc[i]/scale;
+            }
+            for (label s=0; s<ne; ++s)
+                forAll(species_, i)
+                    preconditioner[celli](r,s) += derivative[r][i][celli]
+                        *transportResponse_[i][celli]*equilibriumN_[i][s];
+        }
+    }
+    // Right preconditioning uses the existing local equilibrium Jacobian.
+    const auto precondition = [&](const Vector& v)
+    {
+        Vector z(v.size(), 0.0);
+        scalarField rhs(ne), solution;
+        for (label celli=0; celli<nc; ++celli)
+        {
+            for (label r=0; r<ne; ++r) rhs[r] = v[r*nc+celli];
+            scalar pivot=GREAT;
+            if (!solveLocalSystem(preconditioner[celli], rhs, solution, pivot))
+                FatalErrorInFunction
+                    << "Singular coupled Newton preconditioner at cell "
+                    << celli << exit(FatalError);
+            for (label r=0; r<ne; ++r) z[r*nc+celli] = solution[r];
+        }
+        return z;
+    };
+    const auto apply = [&](const Vector& v)
+    {
+        const Vector z = precondition(v);
+        List<scalarField> direction(ne);
+        for (label r=0; r<ne; ++r)
+        {
+            direction[r].setSize(nc);
+            for (label celli=0; celli<nc; ++celli)
+                direction[r][celli] = z[r*nc+celli];
+        }
+        const List<scalarField> dc = transportMatrixResponse(direction);
+        Vector result(v.size(), 0.0);
+        for (label r=0; r<ne; ++r)
+            forAll(species_, i)
+                for (label celli=0; celli<nc; ++celli)
+                    result[r*nc+celli] += derivative[r][i][celli]*dc[i][celli];
+        return result;
+    };
+    const auto dot = [&](const Vector& a, const Vector& v)
+    {
+        scalar sum = 0.0;
+        for (size_t i=0; i<a.size(); ++i) sum += a[i]*v[i];
+        reduce(sum, sumOp<scalar>());
+        return sum;
+    };
+    Vector y;
+    int iterations = 0;
+    scalar norm = GREAT;
+    const bool ok = equilibriumKrylov::solve
+    (
+        b, y, apply, dot, coupledRestart_, coupledMaxIter_,
+        coupledRelTol_, coupledAbsTol_, iterations, norm
+    );
+    const scalar initialNorm = std::sqrt(max(dot(b,b), scalar(0)));
+    Info<< "Coupled equilibrium Newton: Krylov iterations=" << iterations
+        << ", initial scaled norm=" << initialNorm
+        << ", final true scaled norm=" << norm
+        << ", converged=" << ok << nl;
+    if (!ok)
+        FatalErrorInFunction << "Coupled equilibrium Newton linear solve failed. "
+            << "No reaction correction was applied."
+            << exit(FatalError);
+    const Vector z = precondition(y);
+    List<scalarField> direction(ne);
+    for (label r=0; r<ne; ++r)
+    {
+        direction[r].setSize(nc);
+        for (label celli=0; celli<nc; ++celli)
+            direction[r][celli] = z[r*nc+celli];
+    }
+    return direction;
+}
+
+
+List<scalarField> reactionManager::transportMatrixResponse
+(
+    const List<scalarField>& direction
+) const
+{
+    List<scalarField> response(species_.size());
+    forAll(species_, i)
+    {
+        response[i].setSize(mesh_.nCells(), 0.0);
+        bool participating = false;
+        forAll(equilibriumN_[i], r)
+            participating = participating || equilibriumN_[i][r] != 0;
+        if (!participating || i == inertIndex_) continue;
+        if (!transportMatrices_.set(i))
+            FatalErrorInFunction << "Missing transport matrix for " << species_[i]
+                << exit(FatalError);
+        const fvScalarMatrix& stored = transportMatrices_[i];
+
+        // Use an unregistered clone with the same concentration name, so
+        // species-dependent patch types retain their species identity.
+        // The real concentration field is never modified by this solve.
+        volScalarField trial
+        (
+            IOobject(c_[i].name(), mesh_.time().timeName(), mesh_,
+                IOobject::NO_READ, IOobject::NO_WRITE, false),
+            c_[i]
+        );
+        fvScalarMatrix responseEqn(trial, stored.dimensions());
+        responseEqn.diag() = stored.diag();
+        if (!stored.diagonal()) responseEqn.upper() = stored.upper();
+        if (stored.asymmetric()) responseEqn.lower() = stored.lower();
+        responseEqn.internalCoeffs() = stored.internalCoeffs();
+        responseEqn.boundaryCoeffs() = stored.boundaryCoeffs();
+
+        // residual = b - A*c, including boundary/interface contributions.
+        // Subtract it to anchor the trial at the current transported state:
+        // A*cTrial = A*c + V*N*direction. This avoids treating any baseline
+        // linear-solve error as part of the reaction response.
+        if (equilibriumResponse_ == "coupledNewton")
+        {
+            // Direct increment solve: avoid subtracting nearly equal absolute
+            // concentrations in repeated Krylov matrix-vector products.
+            trial.primitiveFieldRef() = 0.0;
+            forAll(trial.boundaryField(), patchi)
+            {
+                trial.boundaryFieldRef()[patchi] == scalar(0);
+                if (!trial.boundaryField()[patchi].coupled())
+                    responseEqn.boundaryCoeffs()[patchi] = 0.0;
+            }
+            responseEqn.source() = 0.0;
+        }
+        else
+        {
+            responseEqn.source() = stored.source() - stored.residual()();
+        }
+        forAll(direction, r)
+            responseEqn.source() +=
+                mesh_.V()*equilibriumN_[i][r]*direction[r];
+        if (equilibriumResponse_ == "coupledNewton")
+        {
+            scalar maxSource = 0.0;
+            forAll(responseEqn.source(), celli)
+                maxSource = max(maxSource, mag(responseEqn.source()[celli]));
+            reduce(maxSource, maxOp<scalar>());
+            if (maxSource == 0) continue;
+        }
+        if (equilibriumDiagnostics_)
+            Info<< "Equilibrium transport response solve: species="
+                << species_[i] << nl;
+        const auto performance = responseEqn.solve(responseSolver_);
+        bool responseOK = performance.converged();
+        reduce(responseOK, andOp<bool>());
+        if (!responseOK)
+            FatalErrorInFunction << "Neighbour response solve failed for "
+                << species_[i] << ": final residual=" << performance.finalResidual()
+                << ". Check responseSolver and transport matrix."
+                << exit(FatalError);
+        if (equilibriumResponse_ == "coupledNewton")
+            response[i] = trial.primitiveField();
+        else
+            response[i] = trial.primitiveField() - c_[i].primitiveField();
+    }
+    return response;
+}
+
+void reactionManager::applyTransportMatrixCorrection
+(
+    const List<scalarField>& direction
+)
+{
+    const List<scalarField> response = transportMatrixResponse(direction);
+    scalar alpha = equilibriumRelaxation_;
+    label localLimiter = -1, localLimiterCell = -1;
+    forAll(species_, i)
+    {
+        forAll(response[i], celli)
+        {
+            const scalar ci = c_[i][celli];
+            const scalar dc = response[i][celli];
+            if (!std::isfinite(ci) || ci < 0 || !std::isfinite(dc))
+                FatalErrorInFunction << "Invalid neighbour response for "
+                    << species_[i] << " at cell " << celli
+                    << ": c=" << ci << ", deltaC=" << dc << exit(FatalError);
+            if (equilibriumFBL_ && dc < 0
+             && alpha*(-dc) > equilibriumFractionToBoundary_*ci)
+            {
+                alpha = equilibriumFractionToBoundary_*ci/(-dc);
+                localLimiter = i;
+                localLimiterCell = celli;
+            }
+        }
+    }
+
+    // A single scalar commutes with A^-1; cell-dependent damping does not.
+    const scalar localAlpha = alpha;
+    reduce(alpha, minOp<scalar>());
+    if (!std::isfinite(alpha) || alpha <= 0)
+        FatalErrorInFunction << "No positive global neighbour-response FBL step "
+            << "is feasible (a zero species may have a negative response)."
+            << exit(FatalError);
+    if (equilibriumResponse_ == "coupledNewton")
+    {
+        scalar baseSquared = 0.0;
+        forAll(residual_, r)
+            forAll(residual_[r], celli)
+                baseSquared += sqr(residual_[r][celli]/residualScale_[r][celli]);
+        reduce(baseSquared, sumOp<scalar>());
+        scalarField concentrations(species_.size()), nu(species_.size()), dFdc;
+        bool accepted = false;
+        scalar trialSquared = GREAT;
+        label backtracks = 0;
+        for (; backtracks <= coupledMaxBacktracks_; ++backtracks)
+        {
+            trialSquared = 0.0;
+            bool valid = true;
+            forAll(mesh_.V(), celli)
+            {
+                forAll(c_, i)
+                {
+                    concentrations[i] = c_[i][celli] + alpha*response[i][celli];
+                    valid = valid && std::isfinite(concentrations[i])
+                        && concentrations[i] >= 0;
+                }
+                if (!valid) break;
+                forAll(equilibriumReactionIndices_, r)
+                {
+                    const reactionRecord& rec = reactions_[equilibriumReactionIndices_[r]];
+                    nu = 0.0;
+                    forAll(rec.speciesIndices, j)
+                        nu[rec.speciesIndices[j]] = rec.stoichCoeffs[j];
+                    scalar F=0, P=0, KR=0;
+                    rec.model->equilibriumResidualAndJacobian
+                        (celli, concentrations, nu, F, dFdc, P, KR);
+                    valid = valid && std::isfinite(F);
+                    if (!valid) break;
+                    trialSquared += sqr(F/residualScale_[r][celli]);
+                }
+                if (!valid) break;
+            }
+            reduce(valid, andOp<bool>());
+            reduce(trialSquared, sumOp<scalar>());
+            if (valid && std::isfinite(trialSquared)
+             && trialSquared <= sqr(1-coupledSufficientDecrease_*alpha)*baseSquared)
+            {
+                accepted = true;
+                break;
+            }
+            if (backtracks < coupledMaxBacktracks_) alpha *= coupledReduction_;
+        }
+        Info<< "Coupled equilibrium predicted line search: backtracks="
+            << backtracks << ", base scaled norm=" << std::sqrt(baseSquared)
+            << ", trial scaled norm=" << std::sqrt(trialSquared)
+            << ", accepted=" << accepted << nl;
+        if (!accepted)
+            FatalErrorInFunction << "Coupled predicted line search failed. "
+                << "No reaction correction was applied." << exit(FatalError);
+    }
+    Info<< "Equilibrium neighbour response: global alpha=" << alpha
+        << ", cap=" << equilibriumRelaxation_ << nl;
+    if (localLimiter >= 0 && localAlpha == alpha)
+        Pout<< "Equilibrium global limiter: species=" << species_[localLimiter]
+            << " localCell=" << localLimiterCell
+            << " centre=" << mesh_.C()[localLimiterCell] << nl;
+
+    forAll(lambda_, r)
+    {
+        lambda_[r] += alpha*direction[r];
+        forAll(lambda_[r], celli)
+            if (!std::isfinite(lambda_[r][celli]))
+                FatalErrorInFunction << "Non-finite neighbour-corrected lambda"
+                    << exit(FatalError);
+    }
+    if (equilibriumDiagnostics_)
+    {
+        forAll(diagnosticAlpha_, celli)
+        {
+            diagnosticAlpha_[celli] = alpha;
+            // -2 denotes a global limiter, possibly on another processor.
+            diagnosticLimiter_[celli] = -2;
+        }
+        forAll(direction, r) diagnosticDeltaLambda_[r] = alpha*direction[r];
+        forAll(response, i) diagnosticDeltaC_[i] = alpha*response[i];
+    }
+}
+
+
+void reactionManager::beginTransportDiagnostics()
+{
+    if (equilibriumDiagnostics_ && diagnosticStepValid_)
+        diagnosticTransported_ = false;
+}
+
+
+void reactionManager::reportTransportDiagnostics(const label speciesI)
+{
+    if (!equilibriumDiagnostics_) return;
+    if (diagnosticStepValid_) diagnosticTransported_[speciesI] = true;
+    const scalarField& actual = c_[speciesI].primitiveField();
+    label minCell = -1, mismatchCell = -1;
+    scalar minInternal = GREAT, maxMismatch = -1;
+    forAll(actual, celli)
+    {
+        if (actual[celli] < minInternal)
+        {
+            minInternal = actual[celli];
+            minCell = celli;
+        }
+        if (diagnosticStepValid_)
+        {
+            const scalar error = mag(actual[celli] - diagnosticBefore_[speciesI][celli]
+                - diagnosticDeltaC_[speciesI][celli]);
+            if (error > maxMismatch) { maxMismatch = error; mismatchCell = celli; }
+        }
+    }
+    scalar minBoundary = GREAT;
+    label minPatch = -1, minFace = -1;
+    forAll(c_[speciesI].boundaryField(), patchi)
+    {
+        const fvPatchScalarField& patch = c_[speciesI].boundaryField()[patchi];
+        // Processor patches are interfaces, not physical boundaries.
+        if (patch.coupled()) continue;
+        forAll(patch, facei)
+        {
+            if (patch[facei] < minBoundary)
+            {
+                minBoundary = patch[facei];
+                minPatch = patchi;
+                minFace = facei;
+            }
+        }
+    }
+    Pout<< "EQDIAG time=" << mesh_.time().timeName()
+        << " species=" << species_[speciesI]
+        << " localInternalMin=" << minInternal << " localCell=" << minCell
+        << " localPhysicalBoundaryMin=" << minBoundary;
+    if (minPatch >= 0)
+        Pout<< " patch=" << mesh_.boundary()[minPatch].name()
+            << " localFace=" << minFace;
+    Pout<< nl;
+
+    // Print the minimum cell and the worst prediction mismatch. All cell
+    // indices are processor-local; Pout identifies the rank in parallel.
+    for (label sample=0; sample<2; ++sample)
+    {
+        const label celli = sample == 0 ? minCell : mismatchCell;
+        if (celli < 0 || (sample == 1 && celli == minCell)) continue;
+        Pout<< "EQDIAG sample=" << (sample == 0 ? "minimum" : "maxMismatch")
+            << " species=" << species_[speciesI]
+            << " localCell=" << celli << " centre=" << mesh_.C()[celli];
+        if (!diagnosticStepValid_)
+        {
+            Pout<< " noPreviousEquilibriumCorrection" << nl;
+            continue;
+        }
+        Pout<< " alpha=" << diagnosticAlpha_[celli] << " limiter=";
+        const label limiter = diagnosticLimiter_[celli];
+        if (limiter >= 0) Pout<< species_[limiter];
+        else if (limiter == -2) Pout<< "global(seeCorrectionReport)";
+        else Pout<< "none/cap";
+        Pout<< nl;
+        forAll(lambda_, r)
+            Pout<< "EQDIAG reaction="
+                << reactions_[equilibriumReactionIndices_[r]].name
+                << " appliedDeltaLambda=" << diagnosticDeltaLambda_[r][celli]
+                << " lambdaUsed=" << lambda_[r][celli] << nl;
+        forAll(species_, i)
+        {
+            bool participating = false;
+            forAll(equilibriumN_[i], r)
+                participating = participating || equilibriumN_[i][r] != 0;
+            if (!participating) continue;
+            scalar kineticNow = 0.0;
+            forAll(kineticReactionIndices_, k)
+                kineticNow += reactionStoich(reactions_[kineticReactionIndices_[k]], i)
+                    *kineticRates_[k][celli];
+            const scalar before = diagnosticBefore_[i][celli];
+            const scalar predictedDC = diagnosticDeltaC_[i][celli];
+            Pout<< "EQDIAG species=" << species_[i]
+                << " before=" << before
+                << " responseUsed=" << diagnosticResponse_[i][celli]
+                << " predictedDeltaC=" << predictedDC
+                << " predictedC=" << before + predictedDC
+                << " kineticBefore=" << diagnosticKineticBefore_[i][celli]
+                << " kineticUsed=" << kineticNow;
+            if (diagnosticTransported_[i])
+                Pout<< " actualC=" << c_[i][celli]
+                    << " actualDeltaC=" << c_[i][celli] - before
+                    << " predictionError=" << c_[i][celli] - before - predictedDC;
+            else Pout<< " actual=pendingTransport";
+            Pout<< nl;
+        }
+    }
 }
 
 
