@@ -95,11 +95,11 @@
     static List<scalar> cumulativeDiffusion;
     static List<scalar> cumulativeMigration;
     static List<scalar> cumulativeReaction;
+    static List<scalar> cumulativeKineticReaction;
+    static List<scalar> cumulativeEquilibriumReaction;
 
     static autoPtr<OFstream> transportLogPtr;
     static autoPtr<OFstream> conservationLogPtr;
-    static autoPtr<OFstream> electrodeFluxStabilityLogPtr;
-    static autoPtr<OFstream> chargeLogPtr;
     static autoPtr<OFstream> saturationLogPtr;
     static autoPtr<OFstream> DebyeLogPtr;
 
@@ -114,6 +114,8 @@
         cumulativeDiffusion.setSize(c.size(), 0.0);
         cumulativeMigration.setSize(c.size(), 0.0);
         cumulativeReaction.setSize(c.size(), 0.0);
+        cumulativeKineticReaction.setSize(c.size(), 0.0);
+        cumulativeEquilibriumReaction.setSize(c.size(), 0.0);
 
         conservationPatchRole.setSize(mesh.boundary().size(), 0);
 
@@ -188,8 +190,8 @@
 
                 transportLogPtr()
                     << "# time species "
-                    << "advMax diffMax migMax rxnMax "
-                    << "advInt diffInt migInt rxnInt"
+                    << "advMax diffMax migMax rxnKineticMax rxnEquilibriumMax rxnTotalMax "
+                    << "advInt diffInt migInt rxnKineticInt rxnEquilibriumInt rxnTotalInt"
                     << nl;
             }
 
@@ -205,7 +207,7 @@
                     conservationLogPtr()
                         << "# time species N0 Nt dN "
                         << "transport advection diffusion migration "
-                        << "reaction residual relativeResidual"
+                        << "reactionKinetic reactionEquilibrium reactionTotal residual relativeResidual"
                         << nl;
                 }
                 else
@@ -214,61 +216,6 @@
                         << "# time species residual relativeResidual"
                         << nl;
                 }
-            }
-
-            if (diagElectrodeFluxStabilityLog)
-            {
-                electrodeFluxStabilityLogPtr.reset
-                (
-                    new OFstream
-                    (
-                        diagDir/"electrodeFluxStability.dat"
-                    )
-                );
-
-                electrodeFluxStabilityLogPtr()
-                    << "# time species patch "
-                    << "Bmin Bmean Bmax "
-                    << "robinSafetyMin robinSafetyMean robinSafetyMax"
-                    << nl;
-            }
-
-            if (diagChargeLog)
-            {
-                chargeLogPtr.reset
-                (
-                    new OFstream(diagDir/"charge.dat")
-                );
-
-                OFstream& os = chargeLogPtr();
-
-                os << "# time";
-
-                if
-                (
-                    diagChargeOutput == "molarCharge"
-                 || diagChargeOutput == "both"
-                )
-                {
-                    os  << " molarMin"
-                        << " molarMean"
-                        << " molarMax"
-                        << " totalMolarCharge";
-                }
-
-                if
-                (
-                    diagChargeOutput == "chargeDensity"
-                 || diagChargeOutput == "both"
-                )
-                {
-                    os  << " chargeMin"
-                        << " chargeMean"
-                        << " chargeMax"
-                        << " totalCharge";
-                }
-
-                os << nl;
             }
 
             if (diagDebyeLog)
@@ -475,6 +422,8 @@
             const scalar diffMax = max(mag(diffTerm)).value();
             const scalar migMax = max(mag(migTerm)).value();
             const scalar rxnMax = max(mag(totalReaction)).value();
+            const scalar kineticMax = gMax(mag(RcKinetic[i]));
+            const scalar equilibriumMax = gMax(mag(RcEquilibrium[i]));
 
             const scalar advInt =
                 gSum(mag(advTerm.primitiveField())*mesh.V());
@@ -485,13 +434,18 @@
             const scalar rxnInt =
                 gSum(mag(totalReaction.primitiveField())*mesh.V());
 
+            const scalar kineticInt = gSum(mag(RcKinetic[i])*mesh.V());
+            const scalar equilibriumInt = gSum(mag(RcEquilibrium[i])*mesh.V());
+
             if (diagTransportPrint)
             {
                 Info<< "  " << specieName
-                    << " max|adv diff mig rxn| = "
+                    << " max|adv diff mig rxnKinetic rxnEquilibrium rxnTotal| = "
                     << advMax << " "
                     << diffMax << " "
                     << migMax << " "
+                    << kineticMax << " "
+                    << equilibriumMax << " "
                     << rxnMax
                     << " [mol/m3/s]"
                     << nl;
@@ -511,10 +465,14 @@
                     << advMax << ' '
                     << diffMax << ' '
                     << migMax << ' '
+                    << kineticMax << ' '
+                    << equilibriumMax << ' '
                     << rxnMax << ' '
                     << advInt << ' '
                     << diffInt << ' '
                     << migInt << ' '
+                    << kineticInt << ' '
+                    << equilibriumInt << ' '
                     << rxnInt << nl;
             }
         }
@@ -633,6 +591,11 @@
                 gSum(Rc[i].primitiveField()*mesh.V());
 
             cumulativeReaction[i] += reactionRate*dt;
+            if (diagConservationMode == "breakdown")
+            {
+                cumulativeKineticReaction[i] += gSum(RcKinetic[i]*mesh.V())*dt;
+                cumulativeEquilibriumReaction[i] += gSum(RcEquilibrium[i]*mesh.V())*dt;
+            }
 
             const scalar Nt =
                 gSum(ci.primitiveField()*mesh.V());
@@ -680,7 +643,9 @@
                         << cumulativeDiffusion[i] << " mol" << nl
                         << "      migration = "
                         << cumulativeMigration[i] << " mol" << nl
-                        << "    reaction    = " << reaction << " mol" << nl
+                        << "    reaction total = " << reaction << " mol" << nl
+                        << "      kinetic      = " << cumulativeKineticReaction[i] << " mol" << nl
+                        << "      equilibrium  = " << cumulativeEquilibriumReaction[i] << " mol" << nl
                         << "    residual    = " << residual << " mol" << nl
                         << "    rel         = " << relativeResidual << nl;
                 }
@@ -713,6 +678,8 @@
                         << cumulativeAdvection[i] << ' '
                         << cumulativeDiffusion[i] << ' '
                         << cumulativeMigration[i] << ' '
+                        << cumulativeKineticReaction[i] << ' '
+                        << cumulativeEquilibriumReaction[i] << ' '
                         << reaction << ' '
                         << residual << ' '
                         << relativeResidual
@@ -734,154 +701,6 @@
             Info<< endl;
         }
     }
-
-// ############################################################ Electrode flux stability ############################################################
-
-    if (diagElectrodeFluxStabilityActive)
-    {
-        if (diagElectrodeFluxStabilityPrint)
-        {
-            Info<< "Electrode flux stability diagnostics:" << nl;
-        }
-
-        forAll(c, i)
-        {
-            scalar zi = 0.0;
-
-            if (zDictPtr)
-            {
-                zi =
-                    zDictPtr->getOrDefault<scalar>
-                    (
-                        species[i],
-                        0.0
-                    );
-            }
-
-            if (mag(zi) <= SMALL)
-            {
-                continue;
-            }
-
-            const volScalarField& ci = c[i];
-
-            forAll(mesh.boundary(), patchi)
-            {
-                if (conservationPatchRole[patchi] != 2)
-                {
-                    continue;
-                }
-
-                const fvPatchScalarField& cp =
-                    ci.boundaryField()[patchi];
-
-                // galvanostaticMolarFlux uses the Robin denominator
-                // delta + beta.  Report its conditioning only on patches
-                // where that actual PotentialReaction boundary condition is
-                // applied.
-                if (cp.type() != "galvanostaticMolarFlux")
-                {
-                    continue;
-                }
-
-                const fvPatch& patch = mesh.boundary()[patchi];
-
-                if (!patch.size())
-                {
-                    continue;
-                }
-
-                const scalarField& delta =
-                    patch.deltaCoeffs();
-
-                const vectorField nf(patch.nf());
-
-                const fvPatchScalarField& phiEp =
-                    phiE.boundaryField()[patchi];
-                scalarField snGradPhiE(phiEp.size(), 0.0);
-                if (potentialMgr.active()) snGradPhiE = phiEp.snGrad();
-
-                scalarField B(patch.size(), 0.0);
-                scalarField robinSafety(patch.size(), 0.0);
-
-                forAll(B, facei)
-                {
-                    const scalar normalGradPhiE = snGradPhiE[facei];
-
-                    const scalar beta =
-                        zi
-                       *Fdim.value()
-                       /(Rgas.value()*T.value())
-                       *normalGradPhiE;
-
-                    B[facei] =
-                        mag(beta/delta[facei]);
-
-                    robinSafety[facei] =
-                        mag((delta[facei] + beta)/delta[facei]);
-                }
-
-                const fvsPatchScalarField& magSf =
-                    mesh.magSf().boundaryField()[patchi];
-
-                const scalar patchArea = gSum(magSf);
-
-                const scalar BMin = gMin(B);
-                const scalar BMax = gMax(B);
-                const scalar BMean =
-                    gSum(B*magSf)/(patchArea + VSMALL);
-
-                const scalar safetyMin = gMin(robinSafety);
-                const scalar safetyMax = gMax(robinSafety);
-                const scalar safetyMean =
-                    gSum(robinSafety*magSf)/(patchArea + VSMALL);
-
-                if (diagElectrodeFluxStabilityPrint)
-                {
-                    Info<< "  " << ci.name()
-                        << " patch " << patch.name() << nl
-                        << "    B=|beta/delta| min/mean/max = "
-                        << BMin << " / "
-                        << BMean << " / "
-                        << BMax << nl
-                        << "    Robin safety |delta+beta|/delta "
-                        << "min/mean/max = "
-                        << safetyMin << " / "
-                        << safetyMean << " / "
-                        << safetyMax << nl;
-                }
-
-                if
-                (
-                    diagLogTime
-                 && diagElectrodeFluxStabilityLog
-                 && electrodeFluxStabilityLogPtr.valid()
-                )
-                {
-                    electrodeFluxStabilityLogPtr()
-                        << runTime.value() << ' '
-                        << species[i] << ' '
-                        << patch.name() << ' '
-                        << BMin << ' '
-                        << BMean << ' '
-                        << BMax << ' '
-                        << safetyMin << ' '
-                        << safetyMean << ' '
-                        << safetyMax
-                        << nl;
-                }
-            }
-        }
-
-        if (diagElectrodeFluxStabilityPrint)
-        {
-            Info<< endl;
-        }
-    }
-
-// ############################################################ Charge ############################################################
-
-    // Charge output fields are synchronized by electroChem.C.
 
 // ############################################################ Debye resolution ############################################################
 
@@ -911,6 +730,8 @@ if (diagDebyeActive)
             0.0
         );
 
+    // Debye sum is sum(z_i^2*c_i); the potential charge scale instead
+    // uses sum(|z_i|*c_i) with an absolute-tolerance floor.
     forAll(c, i)
     {
         scalar zi = 0.0;

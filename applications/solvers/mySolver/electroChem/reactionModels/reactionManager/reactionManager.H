@@ -140,7 +140,12 @@ public:
     void resetEquilibriumSources();
     void updateKineticRates();
 
-    tmp<volScalarField> source(const label speciesI) const;
+    tmp<volScalarField> source
+    (
+        const label speciesI,
+        scalarField* kineticSource = nullptr,
+        scalarField* equilibriumSource = nullptr
+    ) const;
 
     void setTransportResponse
     (

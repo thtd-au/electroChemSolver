@@ -234,7 +234,6 @@ void electroneutralGalvanostatic::updateCurrentFields()
     }
 
     kappaFace_() = fvc::interpolate(kappa_);
-    jDiffFlux_() = fvc::interpolate(jDiff_) & mesh_.Sf();
 
 
     // Use species-face diffusion discretization consistent with transport.

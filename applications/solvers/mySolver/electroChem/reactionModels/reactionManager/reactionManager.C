@@ -418,7 +418,12 @@ void reactionManager::updateKineticRates()
 }
 
 
-tmp<volScalarField> reactionManager::source(const label speciesI) const
+tmp<volScalarField> reactionManager::source
+(
+    const label speciesI,
+    scalarField* kineticSource,
+    scalarField* equilibriumSource
+) const
 {
     if (speciesI < 0 || speciesI >= species_.size())
         FatalErrorInFunction << "Invalid species index " << speciesI << exit(FatalError);
@@ -433,16 +438,28 @@ tmp<volScalarField> reactionManager::source(const label speciesI) const
         )
     );
     scalarField& src = tSource.ref().primitiveFieldRef();
+    if (kineticSource) kineticSource->setSize(mesh_.nCells(), 0.0);
+    if (equilibriumSource) equilibriumSource->setSize(mesh_.nCells(), 0.0);
+    if (kineticSource) *kineticSource = 0.0;
+    if (equilibriumSource) *equilibriumSource = 0.0;
 
     forAll(kineticReactionIndices_, k)
     {
         const scalar nu = reactionStoich(reactions_[kineticReactionIndices_[k]], speciesI);
-        if (mag(nu) > SMALL) src += nu*kineticRates_[k];
+        if (mag(nu) > SMALL)
+        {
+            src += nu*kineticRates_[k];
+            if (kineticSource) *kineticSource += nu*kineticRates_[k];
+        }
     }
     forAll(equilibriumReactionIndices_, r)
     {
         const scalar nu = equilibriumN_[speciesI][r];
-        if (mag(nu) > SMALL) src += nu*lambda_[r];
+        if (mag(nu) > SMALL)
+        {
+            src += nu*lambda_[r];
+            if (equilibriumSource) *equilibriumSource += nu*lambda_[r];
+        }
     }
     return tSource;
 }

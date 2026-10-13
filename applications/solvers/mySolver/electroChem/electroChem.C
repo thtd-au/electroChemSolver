@@ -16,8 +16,8 @@ int main(int argc, char *argv[])
 {
     argList::addNote
     (
-        "Transient solver for incompressible, turbulent flow"
-        " of Newtonian fluids on a moving mesh."
+        "Transient reactive electrochemical transport with independently selectable"
+        " potential and fast-equilibrium models on a moving mesh."
     );
 
     #include "postProcess.H"
@@ -30,9 +30,6 @@ int main(int argc, char *argv[])
     #include "createDyMControls.H"
     #include "createFields.H"
     #include "createUfIfPresent.H"
-    #include "CourantNo.H"
-    #include "setInitialDeltaT.H"
-
     turbulence->validate();
 
     if (!LTS)

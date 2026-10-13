@@ -61,10 +61,16 @@ forAll(c, i)
         fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)*gradPhiEFlux
     );
 
-    tmp<volScalarField> tReactionSource = reactionMgr.source(i);
+    const bool captureReactionSplit = diagTransportActive || diagConservationActive;
+    tmp<volScalarField> tReactionSource = reactionMgr.source
+    (
+        i,
+        captureReactionSplit ? &RcKinetic[i] : nullptr,
+        captureReactionSplit ? &RcEquilibrium[i] : nullptr
+    );
 
     // Store the total reaction source for post-convergence diagnostics.
-    // No kinetic/equilibrium split is inferred from the transported state.
+    // Split snapshots use the same frozen kinetic rates and lambda as this solve.
     Rc[i] = tReactionSource();
 
     fvScalarMatrix ciEqn

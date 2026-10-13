@@ -170,7 +170,7 @@ void galvanostaticPotentialFlux::updateCoeffs()
             << exit(FatalIOError);
     }
 
-    // These are now the authoritative face fields used by phiEqn.H.
+    // Authoritative face-current fields supplied by the active potential model.
     if
     (
         !mesh.foundObject<surfaceScalarField>("jDiffFlux")
@@ -180,7 +180,7 @@ void galvanostaticPotentialFlux::updateCoeffs()
         FatalErrorInFunction
             << "galvanostaticPotentialFlux requires registered "
             << "surfaceScalarFields jDiffFlux and kappaFace." << nl
-            << "They must be created before phiE in createFields.H."
+            << "They must be registered by the active potential model before boundary evaluation."
             << exit(FatalError);
     }
 

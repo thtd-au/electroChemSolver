@@ -252,21 +252,12 @@ scalar diagLogInterval(1.0);
 Switch diagTransportPrint(false);
 Switch diagTransportLog(false);
 wordList diagTransportSpecies(0);
-word diagTransportReactionMode("total"); // PotentialReaction diagnostics use total source
 
 Switch diagConservationPrint(false);
 Switch diagConservationLog(false);
 word diagConservationMode("residuals"); // residuals | breakdown
 wordList diagFlowPatches(0);
 wordList diagElectrodePatches(0);
-
-Switch diagElectrodeFluxStabilityPrint(false);
-Switch diagElectrodeFluxStabilityLog(false);
-
-word diagChargeOutput("molarCharge");  // molarCharge | chargeDensity | both
-Switch diagChargePrint(false);
-Switch diagChargeLog(false);
-Switch diagChargeWrite(false);
 
 Switch diagSatPrintSi(false);
 Switch diagSatPrintSTot(false);
@@ -308,16 +299,12 @@ if (controlDict.found("diagnostics"))
 
         diagTransportPrint = d.getOrDefault<Switch>("print", false);
         diagTransportLog   = d.getOrDefault<Switch>("log", false);
-        diagTransportReactionMode =
-            d.getOrDefault<word>("reactionMode", word("total"));
-
-        if (diagTransportReactionMode != "total")
+        if (d.found("reactionMode"))
         {
-            FatalIOErrorInFunction(d)
-                << "diagnostics/transport/reactionMode must be total. "
-                << "PotentialReaction does not infer a kinetic/equilibrium "
-                << "split from the accepted transported state."
-                << exit(FatalIOError);
+            WarningInFunction
+                << "diagnostics/transport/reactionMode is obsolete and ignored. "
+                << "Transport diagnostics report the total transported reaction source. "
+                << "Remove reactionMode from controlDict." << nl;
         }
 
         if (d.found("species"))
@@ -362,41 +349,6 @@ if (controlDict.found("diagnostics"))
         {
             diagElectrodePatches =
                 wordList(d.lookup("electrodePatches"));
-        }
-    }
-
-    if (diagDict.found("electrodeFluxStability"))
-    {
-        const dictionary& d =
-            diagDict.subDict("electrodeFluxStability");
-
-        diagElectrodeFluxStabilityPrint =
-            d.getOrDefault<Switch>("print", false);
-
-        diagElectrodeFluxStabilityLog =
-            d.getOrDefault<Switch>("log", false);
-    }
-
-    if (diagDict.found("charge"))
-    {
-        const dictionary& d = diagDict.subDict("charge");
-
-        diagChargeOutput = d.getOrDefault<word>("output", word("molarCharge"));
-        diagChargePrint  = d.getOrDefault<Switch>("print", false);
-        diagChargeLog    = d.getOrDefault<Switch>("log", false);
-        diagChargeWrite  = d.getOrDefault<Switch>("write", false);
-
-        if
-        (
-            diagChargeOutput != "molarCharge"
-         && diagChargeOutput != "chargeDensity"
-         && diagChargeOutput != "both"
-        )
-        {
-            FatalIOErrorInFunction(d)
-                << "diagnostics/charge/output must be "
-                << "molarCharge, chargeDensity, or both"
-                << exit(FatalIOError);
         }
     }
 
@@ -509,20 +461,9 @@ const bool diagTransportActive =
 const bool diagConservationActive =
     diagConservationPrint || diagConservationLog;
 
-const bool diagElectrodeFluxStabilityActive =
-    diagElectrodeFluxStabilityPrint
- || diagElectrodeFluxStabilityLog;
-
-const bool diagChargeActive =
-    diagChargePrint || diagChargeLog || diagChargeWrite;
-
-if (diagChargeActive)
-{
-    FatalIOErrorInFunction(controlDict)
-        << "Legacy diagnostics/charge output is retired; use potential.print/write.E and relE"
-        << exit(FatalIOError);
-}
-
+// postProcess.H includes createFields without the normal diagnostic call sites.
+(void)diagTransportActive;
+(void)diagConservationActive;
 
 const bool diagSaturationActive =
     diagSatPrintSi
@@ -534,19 +475,13 @@ const bool diagSaturationActive =
  || diagSatWritePEqi
  || diagSatWritePEqTot;
 
- const bool diagDebyeActive =
+bool diagDebyeActive =
     diagDebyePrint
+ || diagDebyeWriteIonicSum
  || diagDebyeLog
  || diagDebyeWriteLambda
  || diagDebyeWriteE;
 
-(void)diagTransportActive;
-(void)diagConservationActive;
-(void)diagElectrodeFluxStabilityActive;
-(void)diagChargeActive;
-(void)diagSaturationActive;
-(void)diagDebyeActive;
-(void)diagDebyeDirection;
 
 
 //
@@ -586,6 +521,9 @@ if (reactions.found("chargeNumber"))
 PtrList<volScalarField> c(species.size());
 PtrList<volScalarField> Y(species.size());
 PtrList<volScalarField> Rc(species.size());
+// Snapshots from the source used in the final accepted transport sweep.
+List<scalarField> RcKinetic(species.size());
+List<scalarField> RcEquilibrium(species.size());
 
 
 forAll(species, i)
@@ -779,6 +717,20 @@ potentialManager potentialMgr
 // ############################################ diagnostics fields  ############################################
 //
 
+// Debye resolution output is restricted to active-potential runs.
+if (diagDebyeActive && !potentialMgr.active())
+{
+    WarningInFunction
+        << "DebyeNumber diagnostics requested with potential/model none; "
+        << "disabling Debye print, log and field output for this run." << nl;
+    diagDebyeActive = false;
+    diagDebyePrint = false;
+    diagDebyeLog = false;
+    diagDebyeWriteIonicSum = false;
+    diagDebyeWriteLambda = false;
+    diagDebyeWriteE = false;
+}
+
 // Canonical electroneutrality fields: same residual and scale as potentialMgr.
 volScalarField E
 (
@@ -809,14 +761,6 @@ volVectorField jDiffOutput
     IOobject("jDiff", runTime.timeName(), mesh, IOobject::NO_READ,
         writeJDiff ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
     mesh, dimensionedVector("zero", dimensionSet(0,-2,0,0,0,1,0), vector::zero)
-);
-
-// Legacy charge-density diagnostics remain available as a distinct physical unit.
-dimensionSet dimElectricCharge(0, 0, 1, 0, 0, 1, 0);
-volScalarField chargeDensity
-(
-    IOobject("chargeDensity", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE),
-    mesh, dimensionedScalar("zero", dimElectricCharge/dimVolume, 0.0)
 );
 
 volScalarField ionicSumField
