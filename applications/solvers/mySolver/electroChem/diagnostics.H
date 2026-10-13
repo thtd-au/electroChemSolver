@@ -230,16 +230,7 @@
                     << nl;
             }
 
-            if
-            (
-                diagSaturationActive
-             && (
-                    diagSatPrintSi
-                 || diagSatPrintSTot
-                 || diagSatPrintPEqi
-                 || diagSatPrintPEqTot
-                )
-            )
+            if (diagSatLog)
             {
                 saturationLogPtr.reset
                 (
@@ -946,7 +937,7 @@ if (diagDebyeActive)
             }
 
             // No collective operations inside this master-only block.
-            if (diagLogTime && saturationLogPtr.valid())
+            if (diagSatLog && diagLogTime && saturationLogPtr.valid())
             {
                 saturationLogPtr()
                     << runTime.value() << ' '

@@ -259,6 +259,7 @@ word diagConservationMode("residuals"); // residuals | breakdown
 wordList diagFlowPatches(0);
 wordList diagElectrodePatches(0);
 
+Switch diagSatLog(false);
 Switch diagSatPrintSi(false);
 Switch diagSatPrintSTot(false);
 Switch diagSatPrintPEqi(false);
@@ -355,6 +356,8 @@ if (controlDict.found("diagnostics"))
     if (diagDict.found("saturation"))
     {
         const dictionary& d = diagDict.subDict("saturation");
+
+        diagSatLog = d.getOrDefault<Switch>("log", false);
 
         if (d.found("print"))
         {
@@ -466,7 +469,8 @@ const bool diagConservationActive =
 (void)diagConservationActive;
 
 const bool diagSaturationActive =
-    diagSatPrintSi
+    diagSatLog
+ || diagSatPrintSi
  || diagSatPrintSTot
  || diagSatPrintPEqi
  || diagSatPrintPEqTot
