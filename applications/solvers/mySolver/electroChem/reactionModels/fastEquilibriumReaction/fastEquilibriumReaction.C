@@ -52,7 +52,10 @@ void fastEquilibriumReaction::equilibriumResidualAndJacobian
         }
     }
 
-    residual = productTerm - K_*reactantTerm;
+    // Return both sides of the equilibrium equation on the same scale.
+    // reactionManager normalises F by max(|productTerm|, |reactantTerm|).
+    reactantTerm *= K_;
+    residual = productTerm - reactantTerm;
     dFdc.setSize(c.size(), 0.0);
 
     // Product-form derivatives: intentionally avoids P/c and R/c.

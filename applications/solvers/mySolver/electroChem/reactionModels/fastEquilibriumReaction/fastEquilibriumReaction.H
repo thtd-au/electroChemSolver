@@ -30,7 +30,7 @@ public:
         scalar& residual,
         scalarField& dFdc,
         scalar& productTerm,
-        scalar& reactantTerm
+        scalar& reactantTerm // K times the reactant concentration product
     ) const override;
 };
 
