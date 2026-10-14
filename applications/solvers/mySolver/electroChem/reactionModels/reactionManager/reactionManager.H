@@ -99,7 +99,6 @@ class reactionManager
     scalar equilibriumRelaxation_;
     bool equilibriumFBL_;
     scalar equilibriumFractionToBoundary_;
-    word equilibriumResponse_;
     dictionary responseSolver_;
     PtrList<fvScalarMatrix> transportMatrices_;
     label coupledRestart_;
@@ -112,6 +111,7 @@ class reactionManager
     List<scalarField> transportMatrixResponse(const List<scalarField>& direction) const;
     List<scalarField> coupledNewtonDirection() const;
     void applyTransportMatrixCorrection(const List<scalarField>& direction);
+    label outputLevel_; // 0 minimal, 1 picard, 2 full, 3 debug
     bool equilibriumDiagnostics_;
     bool diagnosticStepValid_;
     List<scalarField> diagnosticBefore_;
@@ -184,6 +184,9 @@ public:
     void correctEquilibrium();
     void reportEquilibrium() const;
     bool equilibriumDiagnostics() const { return equilibriumDiagnostics_; }
+    void readOutputControls();
+    label transportLogLevel() const { return outputLevel_ == 0 ? 0 : 1; }
+    void reportNoEquilibriumCorrection(const char* reason) const;
     void beginTransportDiagnostics();
     void reportTransportDiagnostics(const label speciesI);
 

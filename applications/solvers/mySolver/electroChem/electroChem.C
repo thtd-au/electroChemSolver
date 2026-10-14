@@ -81,6 +81,10 @@ int main(int argc, char *argv[])
 
     Info<< "\nStarting time loop\n" << endl;
 
+    label picardTimeSteps = 0;
+    label picardMaxUsed = 0;
+    scalar picardTotalUsed = 0.0;
+
     while (runTime.run())
     {
         #include "readDyMControls.H"
@@ -169,6 +173,7 @@ int main(int argc, char *argv[])
         // Fast-equilibrium pseudo-sources are timestep-local iterative state.
         // phiE is deliberately NOT reset: it starts from the previously
         // converged physical-time value read/retained by the solver.
+        reactionMgr.readOutputControls();
         reactionMgr.resetEquilibriumSources();
 
         // Retained across cEqn.H include scope and all Picard sweeps.
@@ -203,6 +208,9 @@ int main(int argc, char *argv[])
             reactionMgr.reportEquilibrium();
             potentialMgr.report();
 
+            if (equilibriumOK)
+                reactionMgr.reportNoEquilibriumCorrection("equilibrium converged");
+
             if (equilibriumOK && electroneutralityOK)
             {
                 electroChemConverged = true;
@@ -214,6 +222,8 @@ int main(int argc, char *argv[])
             // could not be transported and tested in this timestep.
             if (picardI == maxPicardIter - 1)
             {
+                if (!equilibriumOK)
+                    reactionMgr.reportNoEquilibriumCorrection("maxIter reached");
                 break;
             }
 
@@ -247,6 +257,10 @@ int main(int argc, char *argv[])
                 << exit(FatalError);
         }
 
+        ++picardTimeSteps;
+        picardMaxUsed = max(picardMaxUsed, testedPicardStates);
+        picardTotalUsed += testedPicardStates;
+
         updatePotentialOutput();
         if (printE || printRelE)
         {
@@ -278,6 +292,14 @@ int main(int argc, char *argv[])
 
         runTime.printExecutionTime(Info);
     }
+
+    Info<< "Picard iteration summary:" << nl
+        << "    completed timesteps: " << picardTimeSteps << nl
+        << "    max iterations used: " << picardMaxUsed << nl;
+    if (picardTimeSteps)
+        Info<< "    mean iterations used: "
+            << picardTotalUsed/scalar(picardTimeSteps) << nl;
+    else Info<< "    mean iterations used: n/a (no completed timesteps)" << nl;
 
     Info<< "End\n" << endl;
 

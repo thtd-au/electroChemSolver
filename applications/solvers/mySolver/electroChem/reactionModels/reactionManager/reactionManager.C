@@ -3,9 +3,107 @@
 #include "dimensionedScalar.H"
 #include "DynamicList.H"
 #include "token.H"
-#include "equilibriumKrylov.H"
 #include "PstreamReduceOps.H"
 #include <cmath>
+
+#include <vector>
+#include <algorithm>
+#include <limits>
+
+namespace
+{
+namespace equilibriumKrylov
+{
+// Restarted GMRES. apply is the right-preconditioned operator; dot must
+// perform the global reduction when the vectors are distributed.
+template<class Real, class Apply, class Dot>
+bool solve
+(
+    const std::vector<Real>& b, std::vector<Real>& x,
+    Apply apply, Dot dot, const int restart, const int maxIter,
+    const Real relTol, const Real absTol, int& iterations, Real& finalNorm
+)
+{
+    using Vec = std::vector<Real>;
+    x.assign(b.size(), Real(0));
+    iterations = 0;
+    const Real bNorm = std::sqrt(std::max(dot(b,b), Real(0)));
+    const Real target = std::max(absTol, relTol*bNorm);
+    finalNorm = bNorm;
+    if (finalNorm <= target) return true;
+    while (iterations < maxIter)
+    {
+        Vec ax = apply(x), r(b.size());
+        for (size_t i=0; i<b.size(); ++i) r[i] = b[i]-ax[i];
+        const Real beta = std::sqrt(std::max(dot(r,r), Real(0)));
+        finalNorm = beta;
+        if (!std::isfinite(beta)) return false;
+        if (beta <= target) return true;
+        const int m = std::min(restart, maxIter-iterations);
+        std::vector<Vec> v(m+1, Vec(b.size(), Real(0)));
+        std::vector<Vec> h(m+1, Vec(m, Real(0)));
+        Vec cs(m), sn(m), g(m+1, Real(0));
+        for (size_t i=0; i<b.size(); ++i) v[0][i] = r[i]/beta;
+        g[0] = beta;
+        int used = 0;
+        bool breakdown = false;
+        for (int j=0; j<m; ++j)
+        {
+            Vec w = apply(v[j]);
+            // Two-pass modified Gram-Schmidt improves orthogonality.
+            for (int pass=0; pass<2; ++pass)
+                for (int k=0; k<=j; ++k)
+                {
+                    const Real a = dot(w,v[k]);
+                    h[k][j] += a;
+                    for (size_t i=0; i<w.size(); ++i) w[i] -= a*v[k][i];
+                }
+            h[j+1][j] = std::sqrt(std::max(dot(w,w), Real(0)));
+            if (!std::isfinite(h[j+1][j])) return false;
+            breakdown = h[j+1][j] <= std::numeric_limits<Real>::min();
+            if (!breakdown)
+                for (size_t i=0; i<w.size(); ++i) v[j+1][i] = w[i]/h[j+1][j];
+            for (int k=0; k<j; ++k)
+            {
+                const Real a = cs[k]*h[k][j] + sn[k]*h[k+1][j];
+                h[k+1][j] = -sn[k]*h[k][j] + cs[k]*h[k+1][j];
+                h[k][j] = a;
+            }
+            const Real denom = std::hypot(h[j][j], h[j+1][j]);
+            if (!std::isfinite(denom) || denom <= std::numeric_limits<Real>::min())
+                return false;
+            cs[j] = h[j][j]/denom;
+            sn[j] = h[j+1][j]/denom;
+            h[j][j] = denom;
+            h[j+1][j] = 0;
+            g[j+1] = -sn[j]*g[j];
+            g[j] *= cs[j];
+            ++iterations;
+            used = j+1;
+            if (std::abs(g[j+1]) <= target || breakdown) break;
+        }
+        Vec y(used);
+        for (int j=used; j-- > 0;)
+        {
+            Real value = g[j];
+            for (int k=j+1; k<used; ++k) value -= h[j][k]*y[k];
+            y[j] = value/h[j][j];
+            if (!std::isfinite(y[j])) return false;
+        }
+        for (int j=0; j<used; ++j)
+            for (size_t i=0; i<x.size(); ++i) x[i] += y[j]*v[j][i];
+        // Verify the true residual, not just the Arnoldi estimate.
+        ax = apply(x);
+        for (size_t i=0; i<r.size(); ++i) r[i] = b[i]-ax[i];
+        finalNorm = std::sqrt(std::max(dot(r,r), Real(0)));
+        if (!std::isfinite(finalNorm)) return false;
+        if (finalNorm <= target) return true;
+        if (breakdown) return false;
+    }
+    return false;
+}
+}
+} // anonymous namespace
 
 namespace Foam
 {
@@ -99,18 +197,19 @@ reactionManager::reactionManager
     transportResponse_(), residual_(), residualScale_(),
     equilibriumAbsTol_(), equilibriumRelTol_(), equilibriumRelaxation_(1.0),
     equilibriumFBL_(false), equilibriumFractionToBoundary_(0.99),
-    equilibriumResponse_("diagonal"), responseSolver_(), transportMatrices_(),
+    responseSolver_(), transportMatrices_(),
     coupledRestart_(20), coupledMaxIter_(100),
     coupledRelTol_(1e-6), coupledAbsTol_(1e-12),
     coupledMaxBacktracks_(30), coupledReduction_(0.5),
     coupledSufficientDecrease_(1e-4),
-    equilibriumDiagnostics_(false), diagnosticStepValid_(false),
+    outputLevel_(1), equilibriumDiagnostics_(false), diagnosticStepValid_(false),
     diagnosticBefore_(), diagnosticDeltaC_(), diagnosticResponse_(), diagnosticKineticBefore_(),
     diagnosticDeltaLambda_(), diagnosticAlpha_(), diagnosticLimiter_(),
     diagnosticTransported_(),
     equilibriumGram_(0), equilibriumN_(), equilibriumEvaluated_(false),
     equilibriumConverged_(false)
 {
+    readOutputControls();
     readReactions();
     readEquilibriumControls();
     buildAndValidateEquilibriumStoichiometry();
@@ -254,51 +353,50 @@ void reactionManager::readEquilibriumControls()
             << exit(FatalIOError);
     }
     const dictionary& eqControls = picard.subDict("equilibrium");
-    equilibriumResponse_ =
-        eqControls.lookupOrDefault<word>("response", "diagonal");
-    if (equilibriumResponse_ != "diagonal"
-     && equilibriumResponse_ != "transportMatrix"
-     && equilibriumResponse_ != "coupledNewton")
-    {
+    if (eqControls.found("response") || eqControls.found("diagnostics"))
         FatalIOErrorInFunction(eqControls)
-            << "response must be diagonal, transportMatrix, or coupledNewton"
+            << "Remove response and diagnostics: coupled Newton is mandatory. "
+            << "Set electroChemOutput minimal/picard/full/debug in controlDict."
             << exit(FatalIOError);
-    }
-    if (equilibriumResponse_ != "diagonal")
-    {
-        responseSolver_ = eqControls.subDict("responseSolver");
-        transportMatrices_.setSize(species_.size());
-    }
-    if (equilibriumResponse_ == "coupledNewton")
-    {
-        const dictionary& k = eqControls.subDict("coupledSolver");
-        coupledRestart_ = k.lookupOrDefault<label>("restart", 20);
-        coupledMaxIter_ = k.lookupOrDefault<label>("maxIter", 100);
-        coupledRelTol_ = k.lookupOrDefault<scalar>("relTol", 1e-6);
-        coupledAbsTol_ = k.lookupOrDefault<scalar>("absTol", 1e-12);
-        coupledMaxBacktracks_ = k.lookupOrDefault<label>("maxBacktracks", 30);
-        coupledReduction_ = k.lookupOrDefault<scalar>("reduction", 0.5);
-        coupledSufficientDecrease_ =
-            k.lookupOrDefault<scalar>("sufficientDecrease", 1e-4);
-        if (coupledRestart_ < 1 || coupledMaxIter_ < 1
-         || !std::isfinite(coupledRelTol_) || coupledRelTol_ <= 0
-         || coupledRelTol_ >= 1
-         || !std::isfinite(coupledAbsTol_) || coupledAbsTol_ <= 0)
-            FatalIOErrorInFunction(k)
-                << "Require restart,maxIter >= 1, 0 < relTol < 1, absTol > 0"
-                << exit(FatalIOError);
-        if (coupledMaxBacktracks_ < 0
-         || !std::isfinite(coupledReduction_)
-         || coupledReduction_ <= 0 || coupledReduction_ >= 1
-         || !std::isfinite(coupledSufficientDecrease_)
-         || coupledSufficientDecrease_ <= 0
-         || coupledSufficientDecrease_ >= 1)
-            FatalIOErrorInFunction(k)
-                << "Require maxBacktracks>=0, 0<reduction,sufficientDecrease<1"
-                << exit(FatalIOError);
-    }
-    equilibriumDiagnostics_ =
-        eqControls.lookupOrDefault<bool>("diagnostics", false);
+
+    responseSolver_.add("solver", word("PBiCGStab"));
+    responseSolver_.add("preconditioner", word("DILU"));
+    responseSolver_.add("tolerance", scalar(1e-12));
+    responseSolver_.add("relTol", scalar(0));
+    responseSolver_.add("minIter", label(1));
+    responseSolver_.add("maxIter", label(1000));
+    if (eqControls.found("responseSolver"))
+        responseSolver_.merge(eqControls.subDict("responseSolver"));
+    transportMatrices_.setSize(species_.size());
+
+    dictionary k;
+    if (eqControls.found("coupledSolver")) k = eqControls.subDict("coupledSolver");
+    coupledRestart_ = k.lookupOrDefault<label>("restart", 20);
+    coupledMaxIter_ = k.lookupOrDefault<label>("maxIter", 100);
+    coupledRelTol_ = k.lookupOrDefault<scalar>("relTol", 1e-6);
+    coupledAbsTol_ = k.lookupOrDefault<scalar>("absTol", 1e-12);
+    if (k.found("maxBacktracks") || k.found("reduction") || k.found("sufficientDecrease"))
+        FatalIOErrorInFunction(k)
+            << "Move maxBacktracks, reduction, sufficientDecrease to equilibrium/lineSearch"
+            << exit(FatalIOError);
+    dictionary search;
+    if (eqControls.found("lineSearch")) search = eqControls.subDict("lineSearch");
+    coupledMaxBacktracks_ = search.lookupOrDefault<label>("maxBacktracks", 30);
+    coupledReduction_ = search.lookupOrDefault<scalar>("reduction", 0.5);
+    coupledSufficientDecrease_ = search.lookupOrDefault<scalar>("sufficientDecrease", 1e-4);
+    if (coupledRestart_ < 1 || coupledMaxIter_ < 1
+     || !std::isfinite(coupledRelTol_) || coupledRelTol_ <= 0 || coupledRelTol_ >= 1
+     || !std::isfinite(coupledAbsTol_) || coupledAbsTol_ <= 0)
+        FatalIOErrorInFunction(eqControls)
+            << "Require restart,maxIter>=1, 0<relTol<1, absTol>0"
+            << exit(FatalIOError);
+    if (coupledMaxBacktracks_ < 0
+     || !std::isfinite(coupledReduction_) || coupledReduction_ <= 0 || coupledReduction_ >= 1
+     || !std::isfinite(coupledSufficientDecrease_)
+     || coupledSufficientDecrease_ <= 0 || coupledSufficientDecrease_ >= 1)
+        FatalIOErrorInFunction(eqControls)
+            << "Require maxBacktracks>=0, 0<reduction,sufficientDecrease<1"
+            << exit(FatalIOError);
     // Inspect the token so both a scalar and the FBL selector are accepted.
     ITstream& relaxationStream = eqControls.lookup("relaxation");
     const token relaxationToken(relaxationStream);
@@ -376,6 +474,7 @@ void reactionManager::readEquilibriumControls()
         if (entries[i] == "relaxation"
          || entries[i] == "responseSolver"
          || entries[i] == "coupledSolver"
+         || entries[i] == "lineSearch"
          || entries[i] == "maxRelaxation"
          || entries[i] == "fractionToBoundary"
          || !eqControls.isDict(entries[i])) continue;
@@ -578,7 +677,6 @@ void reactionManager::setTransportResponse(const label speciesI, const fvScalarM
     if (speciesI < 0 || speciesI >= species_.size() || speciesI == inertIndex_)
         FatalErrorInFunction << "Invalid active species index " << speciesI << exit(FatalError);
 
-    if (equilibriumResponse_ != "diagonal")
     {
         bool participating = false;
         forAll(equilibriumN_[speciesI], r)
@@ -698,137 +796,7 @@ void reactionManager::correctEquilibrium()
         diagnosticStepValid_ = true;
     }
 
-    if (equilibriumResponse_ == "coupledNewton")
-    {
-        applyTransportMatrixCorrection(coupledNewtonDirection());
-        equilibriumEvaluated_ = false;
-        equilibriumConverged_ = false;
-        return;
-    }
-
-    scalarField concentrations(species_.size(), 0.0), nu(species_.size(), 0.0), dFdc(species_.size(), 0.0);
-    scalarSquareMatrix J(ne);
-    scalarField rhs(ne), delta(ne);
-    List<scalarField> direction(ne);
-    if (equilibriumResponse_ == "transportMatrix")
-        forAll(direction, r) direction[r].setSize(mesh_.nCells(), 0.0);
-
-    forAll(mesh_.V(), celli)
-    {
-        if (cellEquilibriumConverged(celli)) continue;
-        J = scalar(0);
-        rhs = 0.0;
-
-        forAll(equilibriumReactionIndices_, r)
-        {
-            const reactionRecord& rec = reactions_[equilibriumReactionIndices_[r]];
-            nu = 0.0;
-            forAll(rec.speciesIndices, j) nu[rec.speciesIndices[j]] = rec.stoichCoeffs[j];
-            forAll(c_, i) concentrations[i] = c_[i][celli];
-
-            scalar F=0, P=0, KR=0;
-            rec.model->equilibriumResidualAndJacobian(celli, concentrations, nu, F, dFdc, P, KR);
-            const scalar q = residualScale_[r][celli];
-            rhs[r] = -F/q;
-
-            for (label s=0; s<ne; ++s)
-            {
-                scalar value = 0.0;
-                forAll(species_, i)
-                    value += dFdc[i]*transportResponse_[i][celli]*equilibriumN_[i][s];
-                J(r,s) = value/q;
-            }
-        }
-
-        scalar minPivot = GREAT;
-        if (!solveLocalSystem(J, rhs, delta, minPivot))
-        {
-            FatalErrorInFunction << "Singular local equilibrium response system at cell " << celli
-                << " centre " << mesh_.C()[celli] << nl << "Scaled J_lambda=" << nl << J
-                << nl << "scaled RHS=" << rhs << nl << "minimum relative pivot=" << minPivot
-                << exit(FatalError);
-        }
-
-        if (equilibriumResponse_ == "transportMatrix")
-        {
-            // Keep the existing local Newton direction, but predict its
-            // concentration response with the whole transport matrix below.
-            forAll(delta, r) direction[r][celli] = delta[r];
-            continue;
-        }
-
-        scalar alpha = equilibriumRelaxation_;
-        label limitingSpecies = -1;
-        if (equilibriumFBL_)
-        {
-            // One factor for the coupled step: deltaC = S*N*deltaLambda.
-            // Limit only species moving towards the c=0 boundary.
-            forAll(species_, i)
-            {
-                if (i == inertIndex_) continue;
-                scalar deltaC = 0.0;
-                forAll(delta, r)
-                    deltaC += equilibriumN_[i][r]*delta[r];
-                deltaC *= transportResponse_[i][celli];
-                const scalar ci = c_[i][celli];
-                if (!std::isfinite(deltaC) || !std::isfinite(ci) || ci < 0)
-                {
-                    FatalErrorInFunction
-                        << "Invalid FBL concentration response for " << species_[i]
-                        << " at cell " << celli << ": c=" << ci
-                        << ", deltaC=" << deltaC << exit(FatalError);
-                }
-                if (deltaC < 0)
-                {
-                    // Compute the ratio only if the current cap would violate
-                    // the safety margin; this also avoids a huge c/(-deltaC).
-                    const scalar available = equilibriumFractionToBoundary_*ci;
-                    if (alpha*(-deltaC) > available)
-                    {
-                        alpha = available/(-deltaC);
-                        limitingSpecies = i;
-                    }
-                }
-            }
-            if (alpha <= 0)
-            {
-                FatalErrorInFunction
-                    << "FBL equilibrium step is blocked at cell " << celli
-                    << ": a zero concentration has a negative predicted increment. "
-                    << "No positive fraction-to-boundary step is feasible."
-                    << exit(FatalError);
-            }
-        }
-
-        if (equilibriumDiagnostics_)
-        {
-            diagnosticAlpha_[celli] = alpha;
-            diagnosticLimiter_[celli] = limitingSpecies;
-            forAll(delta, r)
-                diagnosticDeltaLambda_[r][celli] = alpha*delta[r];
-            forAll(species_, i)
-            {
-                scalar dc = 0.0;
-                forAll(delta, r) dc += equilibriumN_[i][r]*delta[r];
-                diagnosticDeltaC_[i][celli] =
-                    alpha*transportResponse_[i][celli]*dc;
-            }
-        }
-
-        forAll(lambda_, r)
-        {
-            lambda_[r][celli] += alpha*delta[r];
-            if (!std::isfinite(lambda_[r][celli]))
-                FatalErrorInFunction << "Non-finite lambda for "
-                    << reactions_[equilibriumReactionIndices_[r]].name << " at cell " << celli
-                    << exit(FatalError);
-        }
-    }
-
-    if (equilibriumResponse_ == "transportMatrix")
-        applyTransportMatrixCorrection(direction);
-
-    // The corrected lambda has not yet been transported/tested.
+    applyTransportMatrixCorrection(coupledNewtonDirection());
     equilibriumEvaluated_ = false;
     equilibriumConverged_ = false;
 }
@@ -928,7 +896,7 @@ List<scalarField> reactionManager::coupledNewtonDirection() const
         coupledRelTol_, coupledAbsTol_, iterations, norm
     );
     const scalar initialNorm = std::sqrt(max(dot(b,b), scalar(0)));
-    Info<< "Coupled equilibrium Newton: Krylov iterations=" << iterations
+    if (outputLevel_ >= 2) Info<< "Coupled equilibrium Newton: Krylov iterations=" << iterations
         << ", initial scaled norm=" << initialNorm
         << ", final true scaled norm=" << norm
         << ", converged=" << ok << nl;
@@ -982,31 +950,18 @@ List<scalarField> reactionManager::transportMatrixResponse
         responseEqn.internalCoeffs() = stored.internalCoeffs();
         responseEqn.boundaryCoeffs() = stored.boundaryCoeffs();
 
-        // residual = b - A*c, including boundary/interface contributions.
-        // Subtract it to anchor the trial at the current transported state:
-        // A*cTrial = A*c + V*N*direction. This avoids treating any baseline
-        // linear-solve error as part of the reaction response.
-        if (equilibriumResponse_ == "coupledNewton")
+        // Homogeneous perturbation of the frozen transport operator.
+        trial.primitiveFieldRef() = 0.0;
+        forAll(trial.boundaryField(), patchi)
         {
-            // Direct increment solve: avoid subtracting nearly equal absolute
-            // concentrations in repeated Krylov matrix-vector products.
-            trial.primitiveFieldRef() = 0.0;
-            forAll(trial.boundaryField(), patchi)
-            {
-                trial.boundaryFieldRef()[patchi] == scalar(0);
-                if (!trial.boundaryField()[patchi].coupled())
-                    responseEqn.boundaryCoeffs()[patchi] = 0.0;
-            }
-            responseEqn.source() = 0.0;
+            trial.boundaryFieldRef()[patchi] == scalar(0);
+            if (!trial.boundaryField()[patchi].coupled())
+                responseEqn.boundaryCoeffs()[patchi] = 0.0;
         }
-        else
-        {
-            responseEqn.source() = stored.source() - stored.residual()();
-        }
+        responseEqn.source() = 0.0;
         forAll(direction, r)
             responseEqn.source() +=
                 mesh_.V()*equilibriumN_[i][r]*direction[r];
-        if (equilibriumResponse_ == "coupledNewton")
         {
             scalar maxSource = 0.0;
             forAll(responseEqn.source(), celli)
@@ -1014,10 +969,12 @@ List<scalarField> reactionManager::transportMatrixResponse
             reduce(maxSource, maxOp<scalar>());
             if (maxSource == 0) continue;
         }
-        if (equilibriumDiagnostics_)
+        if (outputLevel_ >= 2)
             Info<< "Equilibrium transport response solve: species="
                 << species_[i] << nl;
-        const auto performance = responseEqn.solve(responseSolver_);
+        dictionary controls(responseSolver_);
+        controls.set("log", label(outputLevel_ >= 2 ? 1 : 0));
+        const auto performance = responseEqn.solve(controls);
         bool responseOK = performance.converged();
         reduce(responseOK, andOp<bool>());
         if (!responseOK)
@@ -1025,10 +982,7 @@ List<scalarField> reactionManager::transportMatrixResponse
                 << species_[i] << ": final residual=" << performance.finalResidual()
                 << ". Check responseSolver and transport matrix."
                 << exit(FatalError);
-        if (equilibriumResponse_ == "coupledNewton")
-            response[i] = trial.primitiveField();
-        else
-            response[i] = trial.primitiveField() - c_[i].primitiveField();
+        response[i] = trial.primitiveField();
     }
     return response;
 }
@@ -1068,7 +1022,6 @@ void reactionManager::applyTransportMatrixCorrection
         FatalErrorInFunction << "No positive global neighbour-response FBL step "
             << "is feasible (a zero species may have a negative response)."
             << exit(FatalError);
-    if (equilibriumResponse_ == "coupledNewton")
     {
         scalar baseSquared = 0.0;
         forAll(residual_, r)
@@ -1117,7 +1070,7 @@ void reactionManager::applyTransportMatrixCorrection
             }
             if (backtracks < coupledMaxBacktracks_) alpha *= coupledReduction_;
         }
-        Info<< "Coupled equilibrium predicted line search: backtracks="
+        if (outputLevel_ >= 2) Info<< "Coupled equilibrium predicted line search: backtracks="
             << backtracks << ", base scaled norm=" << std::sqrt(baseSquared)
             << ", trial scaled norm=" << std::sqrt(trialSquared)
             << ", accepted=" << accepted << nl;
@@ -1125,12 +1078,14 @@ void reactionManager::applyTransportMatrixCorrection
             FatalErrorInFunction << "Coupled predicted line search failed. "
                 << "No reaction correction was applied." << exit(FatalError);
     }
-    Info<< "Equilibrium neighbour response: global alpha=" << alpha
+    if (outputLevel_ >= 2) Info<< "Equilibrium neighbour response: global alpha=" << alpha
         << ", cap=" << equilibriumRelaxation_ << nl;
-    if (localLimiter >= 0 && localAlpha == alpha)
+    if (outputLevel_ >= 2 && localLimiter >= 0 && localAlpha == alpha)
         Pout<< "Equilibrium global limiter: species=" << species_[localLimiter]
             << " localCell=" << localLimiterCell
             << " centre=" << mesh_.C()[localLimiterCell] << nl;
+
+    if (equilibriumFBL_) Info<< "relaxation factor = " << alpha << nl;
 
     forAll(lambda_, r)
     {
@@ -1151,6 +1106,28 @@ void reactionManager::applyTransportMatrixCorrection
         forAll(direction, r) diagnosticDeltaLambda_[r] = alpha*direction[r];
         forAll(response, i) diagnosticDeltaC_[i] = alpha*response[i];
     }
+}
+
+
+void reactionManager::readOutputControls()
+{
+    const dictionary& controls = mesh_.time().controlDict();
+    const word level = controls.lookupOrDefault<word>("electroChemOutput", "picard");
+    if (level == "minimal") outputLevel_ = 0;
+    else if (level == "picard") outputLevel_ = 1;
+    else if (level == "full") outputLevel_ = 2;
+    else if (level == "debug") outputLevel_ = 3;
+    else
+        FatalIOErrorInFunction(controls)
+            << "electroChemOutput must be minimal, picard, full, or debug"
+            << exit(FatalIOError);
+    equilibriumDiagnostics_ = outputLevel_ == 3;
+}
+
+void reactionManager::reportNoEquilibriumCorrection(const char* reason) const
+{
+    if (nEquilibriumReactions() && equilibriumFBL_)
+        Info<< "relaxation factor = not applied (" << reason << ')' << nl;
 }
 
 

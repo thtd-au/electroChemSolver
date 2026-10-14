@@ -57,6 +57,8 @@ void fastEquilibriumReaction::equilibriumResidualAndJacobian
     reactantTerm *= K_;
     residual = productTerm - reactantTerm;
     dFdc.setSize(c.size(), 0.0);
+    // Resizing preserves existing entries. Every reaction must overwrite
+    // absent-species derivatives as well as its participating derivatives.
     dFdc = 0.0;
 
     // Product-form derivatives: intentionally avoids P/c and R/c.

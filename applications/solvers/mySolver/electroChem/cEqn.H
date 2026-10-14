@@ -92,7 +92,9 @@ forAll(c, i)
     // S_i = V/aP_i must come from the final constrained transport matrix.
     reactionMgr.setTransportResponse(i, ciEqn);
 
-    const auto transportPerformance = ciEqn.solve(ci.name());
+    dictionary transportControls(ciEqn.solverDict(ci.name()));
+    transportControls.set("log", reactionMgr.transportLogLevel());
+    const auto transportPerformance = ciEqn.solve(transportControls);
     if (reactionMgr.equilibriumDiagnostics())
     {
         Pout<< "EQDIAG linearSolve species=" << species[i]
