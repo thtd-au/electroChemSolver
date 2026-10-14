@@ -7,9 +7,53 @@
 #include "PtrList.H"
 #include "runTimeSelectionTables.H"
 #include "volFields.H"
+#include "error.H"
+#include "boolList.H"
+#include "token.H"
 
 namespace Foam
 {
+
+// Shared output policy for the driver and both electrochemical managers.
+inline label picardOutputLevel(const dictionary& controls)
+{
+    const word level = controls.lookupOrDefault<word>("picardOutput", "picard");
+    if (level == "minimal") return 0;
+    if (level == "picard") return 1;
+    if (level == "full") return 2;
+    if (level == "debug") return 3;
+    FatalIOErrorInFunction(controls)
+        << "picardOutput must be minimal, picard, full, or debug"
+        << exit(FatalIOError);
+    return 0;
+}
+
+// true/false or an unparenthesized sequence of component indices.
+inline boolList potentialPrintDirections(const dictionary& controls, const word& key)
+{
+    boolList selected(3, false);
+    if (!controls.found(key)) return selected;
+    const ITstream& input = controls.lookup(key);
+    if (input.size() == 1 && input[0].isWord())
+    {
+        const word value(input[0].wordToken());
+        if (value == "true") return boolList(3, true);
+        if (value == "false") return selected;
+    }
+    if (input.empty())
+        FatalIOErrorInFunction(controls)
+            << key << " requires true, false, or indices 0=x, 1=y, 2=z"
+            << exit(FatalIOError);
+    forAll(input, i)
+    {
+        if (!input[i].isLabel() || input[i].labelToken() < 0 || input[i].labelToken() > 2)
+            FatalIOErrorInFunction(controls)
+                << key << " requires true, false, or indices 0=x, 1=y, 2=z"
+                << exit(FatalIOError);
+        selected[input[i].labelToken()] = true;
+    }
+    return selected;
+}
 
 class potentialModel
 {

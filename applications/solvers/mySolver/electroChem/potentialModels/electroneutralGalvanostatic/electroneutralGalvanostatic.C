@@ -371,26 +371,31 @@ void electroneutralGalvanostatic::correct()
     setCorrectionBoundaryConditions(deltaPhi);
     deltaPhi.correctBoundaryConditions();
 
-    // Residual correction of the frozen-concentration absolute equation:
-    // div(kappa grad(deltaPhi)) = div(jDiffSpeciesFaces)
-    //                                - div(kappa grad(phiE)).
+    const label outputLevel = picardOutputLevel(mesh_.time().controlDict());
+    // Correct the frozen-concentration current-conservation residual.
+    // j = jDiff - kappa*grad(phiE), so the updated field targets div(j)=0.
     fvScalarMatrix deltaEqn
     (
         fvm::laplacian(kappa_, deltaPhi)
-      ==
-        fvc::div(jDiffFlux_())
-      - fvc::laplacian(kappa_, phiE_)
+      == fvc::div(jDiffFlux_()) - fvc::laplacian(kappa_, phiE_)
     );
-
-
-    if (!hasFixedPotential)
+    if (!hasFixedPotential) deltaEqn.setReference(referenceCell_, 0.0);
+    dictionary solverControls(deltaEqn.solverDict(phiE_.name()));
+    // Emit the result explicitly so the selected Picard verbosity does not
+    // depend on the linear solver's own logging implementation.
+    solverControls.set("log", label(0));
+    const auto potentialPerformance = deltaEqn.solve(solverControls);
+    if (outputLevel >= 1)
     {
-        deltaEqn.setReference(referenceCell_, 0.0);
+        Info<< solverControls.get<word>("solver")
+            << ":  Solving for " << deltaPhi.name()
+            << ", Initial residual = " << potentialPerformance.initialResidual()
+            << ", Final residual = " << potentialPerformance.finalResidual()
+            << ", No Iterations " << potentialPerformance.nIterations() << nl;
     }
-    deltaEqn.solve(phiE_.name());
 
     const scalar maxAbsDeltaPhi = gMax(mag(deltaPhi.primitiveField()));
-    Info<< "Potential correction: max|deltaPhiE|="
+    Info<< "    max|deltaPhiE|="
         << maxAbsDeltaPhi << " V"
         << ", relaxation=" << relaxation_
         << ", applied max|alpha*deltaPhiE|="
@@ -415,10 +420,10 @@ void electroneutralGalvanostatic::report() const
     }
     reduce(maxAbs, maxOp<scalar>());
     reduce(maxRel, maxOp<scalar>());
-    Info<< "Electroneutrality: max|E|=" << maxAbs
-        << " mol/m3, max relative=" << maxRel
-        << ", converged=" << (evaluated_ && converged_ ? "yes" : "no")
-        << nl;
+    Info<< "Electroneutrality: converged="
+        << (evaluated_ && converged_ ? "yes" : "no") << nl
+        << "    max|E|=" << maxAbs << " mol/m3, max relative=" << maxRel
+        << ", absTol=" << absTol_ << ", relTol=" << relTol_ << nl;
 }
 
 } // End namespace Foam

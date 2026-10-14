@@ -84,6 +84,10 @@ int main(int argc, char *argv[])
     label picardTimeSteps = 0;
     label picardMaxUsed = 0;
     scalar picardTotalUsed = 0.0;
+    label electroneutralityMaxUsed = 0;
+    scalar electroneutralityTotalUsed = 0.0;
+    label equilibriumMaxUsed = 0;
+    scalar equilibriumTotalUsed = 0.0;
 
     while (runTime.run())
     {
@@ -183,12 +187,14 @@ int main(int argc, char *argv[])
 
         bool electroChemConverged = false;
         label testedPicardStates = 0;
+        label electroneutralityLastFailed = 0;
+        label equilibriumLastFailed = 0;
 
         for (label picardI = 0; picardI < maxPicardIter; ++picardI)
         {
             testedPicardStates = picardI + 1;
 
-            Info<< "Electrochemical Picard state " << testedPicardStates
+            Info<< "Picard state " << testedPicardStates
                 << '/' << maxPicardIter << nl;
 
             // One common kinetic state for the complete species sweep.
@@ -204,38 +210,31 @@ int main(int argc, char *argv[])
 
             const bool equilibriumOK = reactionMgr.equilibriumConverged();
             const bool electroneutralityOK = potentialMgr.converged();
+            if (!electroneutralityOK) electroneutralityLastFailed = testedPicardStates;
+            if (!equilibriumOK) equilibriumLastFailed = testedPicardStates;
+
+            const bool finalState = picardI == maxPicardIter - 1;
+            const bool constraintsOK = equilibriumOK && electroneutralityOK;
+
+            // Keep each constraint report adjacent to its applied correction.
+            potentialMgr.report();
+            if (!electroneutralityOK && !finalState)
+                potentialMgr.correct();
 
             reactionMgr.reportEquilibrium();
-            potentialMgr.report();
+            if (!equilibriumOK && !finalState)
+                reactionMgr.correctEquilibrium();
+            else
+                reactionMgr.reportNoEquilibriumCorrection
+                (equilibriumOK ? "equilibrium converged" : "maxIter reached");
 
-            if (equilibriumOK)
-                reactionMgr.reportNoEquilibriumCorrection("equilibrium converged");
-
-            if (equilibriumOK && electroneutralityOK)
+            if (constraintsOK)
             {
                 electroChemConverged = true;
                 break;
             }
-
-            // maxIter counts transported-and-tested states.  Never calculate
-            // a correction after the final state because its physical effect
-            // could not be transported and tested in this timestep.
-            if (picardI == maxPicardIter - 1)
-            {
-                if (!equilibriumOK)
-                    reactionMgr.reportNoEquilibriumCorrection("maxIter reached");
-                break;
-            }
-
-            if (!equilibriumOK)
-            {
-                reactionMgr.correctEquilibrium();
-            }
-
-            if (!electroneutralityOK)
-            {
-                potentialMgr.correct();
-            }
+            // Never apply a correction without a following tested transport.
+            if (finalState) break;
 
             // Any lambda/phiE correction is intentionally followed by the
             // next complete cEqn transport before either constraint is tested.
@@ -260,17 +259,50 @@ int main(int argc, char *argv[])
         ++picardTimeSteps;
         picardMaxUsed = max(picardMaxUsed, testedPicardStates);
         picardTotalUsed += testedPicardStates;
+        // First state in the final uninterrupted sequence of passing states.
+        // A constraint passing throughout the timestep uses one tested state.
+        if (potentialMgr.active())
+        {
+            const label used = electroneutralityLastFailed + 1;
+            electroneutralityMaxUsed = max(electroneutralityMaxUsed, used);
+            electroneutralityTotalUsed += used;
+        }
+        if (reactionMgr.nEquilibriumReactions())
+        {
+            const label used = equilibriumLastFailed + 1;
+            equilibriumMaxUsed = max(equilibriumMaxUsed, used);
+            equilibriumTotalUsed += used;
+        }
 
         updatePotentialOutput();
-        if (printE || printRelE)
+        // Accepted-state internal-cell statistics; means are volume weighted.
+        const auto printScalarStats = [&](const word& name,
+            const scalarField& values, const char* units)
         {
-            if (printE)
-                Info<< "E min/max/maxAbs [mol/m3]: "
-                    << gMin(E.primitiveField()) << " / "
-                    << gMax(E.primitiveField()) << " / "
-                    << gMax(mag(E.primitiveField())) << nl;
-            if (printRelE)
-                Info<< "relE max [-]: " << gMax(relE.primitiveField()) << nl;
+            Info<< "    " << name << " min/mean/max [" << units << "]: "
+                << gMin(values) << " / "
+                << gSum(values*mesh.V())/gSum(mesh.V()) << " / "
+                << gMax(values) << nl;
+        };
+        const auto printVectorStats = [&](const word& name,
+            const vectorField& values, const boolList& directions, const char* units)
+        {
+            Info<< "    " << name << " components:" << nl;
+            for (direction cmpt = 0; cmpt < vector::nComponents; ++cmpt)
+            {
+                if (!directions[cmpt]) continue;
+                const word componentName(name + "_" + word(cmpt == 0 ? "x" : cmpt == 1 ? "y" : "z"));
+                const scalarField componentValues(values.component(cmpt));
+                printScalarStats(componentName, componentValues, units);
+            }
+        };
+        if (printPhiE || printGradPhiE || printKappa || printJDiff)
+        {
+            Info<< "Potential field statistics:" << nl;
+            if (printPhiE) printScalarStats("phiE", phiE.primitiveField(), "V");
+            if (printGradPhiE) printVectorStats("gradPhiE", gradPhiE.primitiveField(), printGradPhiEDirections, "V/m");
+            if (printKappa) printScalarStats("kappa", kappaOutput.primitiveField(), "S/m");
+            if (printJDiff) printVectorStats("jDiff", jDiffOutput.primitiveField(), printJDiffDirections, "A/m2");
         }
 
         // Optional summary of the final transport state before clipping.
@@ -300,6 +332,20 @@ int main(int argc, char *argv[])
         Info<< "    mean iterations used: "
             << picardTotalUsed/scalar(picardTimeSteps) << nl;
     else Info<< "    mean iterations used: n/a (no completed timesteps)" << nl;
+
+    const auto reportConstraintIterations = [&](const char* name,
+        const bool active, const label maxUsed, const scalar totalUsed)
+    {
+        Info<< name << ':' << nl;
+        if (!active) Info<< "    inactive" << nl;
+        else if (!picardTimeSteps) Info<< "    no completed timesteps" << nl;
+        else Info<< "    max iterations used: " << maxUsed << nl
+            << "    mean iterations used: " << totalUsed/scalar(picardTimeSteps) << nl;
+    };
+    reportConstraintIterations("electroneutrality", potentialMgr.active(),
+        electroneutralityMaxUsed, electroneutralityTotalUsed);
+    reportConstraintIterations("equilibrium", reactionMgr.nEquilibriumReactions() > 0,
+        equilibriumMaxUsed, equilibriumTotalUsed);
 
     Info<< "End\n" << endl;
 

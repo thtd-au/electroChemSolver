@@ -1,4 +1,5 @@
 #include "reactionManager.H"
+#include "potentialManager.H"
 #include "IOobject.H"
 #include "dimensionedScalar.H"
 #include "DynamicList.H"
@@ -356,7 +357,7 @@ void reactionManager::readEquilibriumControls()
     if (eqControls.found("response") || eqControls.found("diagnostics"))
         FatalIOErrorInFunction(eqControls)
             << "Remove response and diagnostics: coupled Newton is mandatory. "
-            << "Set electroChemOutput minimal/picard/full/debug in controlDict."
+            << "Set picardOutput minimal/picard/full/debug in controlDict."
             << exit(FatalIOError);
 
     responseSolver_.add("solver", word("PBiCGStab"));
@@ -1085,7 +1086,7 @@ void reactionManager::applyTransportMatrixCorrection
             << " localCell=" << localLimiterCell
             << " centre=" << mesh_.C()[localLimiterCell] << nl;
 
-    if (equilibriumFBL_) Info<< "relaxation factor = " << alpha << nl;
+    Info<< "    relaxation factor = " << alpha << nl;
 
     forAll(lambda_, r)
     {
@@ -1111,23 +1112,14 @@ void reactionManager::applyTransportMatrixCorrection
 
 void reactionManager::readOutputControls()
 {
-    const dictionary& controls = mesh_.time().controlDict();
-    const word level = controls.lookupOrDefault<word>("electroChemOutput", "picard");
-    if (level == "minimal") outputLevel_ = 0;
-    else if (level == "picard") outputLevel_ = 1;
-    else if (level == "full") outputLevel_ = 2;
-    else if (level == "debug") outputLevel_ = 3;
-    else
-        FatalIOErrorInFunction(controls)
-            << "electroChemOutput must be minimal, picard, full, or debug"
-            << exit(FatalIOError);
+    outputLevel_ = picardOutputLevel(mesh_.time().controlDict());
     equilibriumDiagnostics_ = outputLevel_ == 3;
 }
 
 void reactionManager::reportNoEquilibriumCorrection(const char* reason) const
 {
-    if (nEquilibriumReactions() && equilibriumFBL_)
-        Info<< "relaxation factor = not applied (" << reason << ')' << nl;
+    if (nEquilibriumReactions())
+        Info<< "    relaxation factor = not applied (" << reason << ')' << nl;
 }
 
 
@@ -1249,7 +1241,8 @@ void reactionManager::reportEquilibrium() const
         return;
     }
 
-    Info<< "Equilibrium residuals:" << nl;
+    Info<< "Equilibrium residuals: converged="
+        << (equilibriumConverged_ ? "yes" : "no") << nl;
     forAll(equilibriumReactionIndices_, r)
     {
         scalar maxAbs = 0, maxRel = 0;

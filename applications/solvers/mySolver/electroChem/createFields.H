@@ -183,10 +183,10 @@ if (controlDict.found("species"))
 // Potential controls
 Switch printPhiE(false);
 Switch printKappa(false);
-Switch printJDiff(false);
-Switch printGradPhiE(false);
-Switch printE(false);
-Switch printRelE(false);
+boolList printJDiffDirections(3, false);
+bool printJDiff = false;
+boolList printGradPhiEDirections(3, false);
+bool printGradPhiE = false;
 
 Switch writePhiE(false);
 Switch writeKappa(false);
@@ -206,10 +206,13 @@ if (controlDict.found("potential"))
 
         printPhiE     = d.getOrDefault<Switch>("phiE", false);
         printKappa    = d.getOrDefault<Switch>("kappa", false);
-        printJDiff    = d.getOrDefault<Switch>("jDiff", false);
-        printGradPhiE = d.getOrDefault<Switch>("gradPhiE", false);
-        printE = d.getOrDefault<Switch>("E", false);
-        printRelE = d.getOrDefault<Switch>("relE", false);
+        printJDiffDirections = potentialPrintDirections(d, "jDiff");
+        printGradPhiEDirections = potentialPrintDirections(d, "gradPhiE");
+        forAll(printJDiffDirections, cmpt)
+        {
+            printJDiff = printJDiff || printJDiffDirections[cmpt];
+            printGradPhiE = printGradPhiE || printGradPhiEDirections[cmpt];
+        }
     }
 
     if (potentialControlDict.found("write"))
@@ -602,6 +605,17 @@ forAll(species, i)
 
 
 }
+// All dependencies now exist. Balance prescribed inlet patches before
+// initial constraint evaluation; this does not project internal concentrations.
+forAll(c, i)
+{
+    forAll(c[i].boundaryField(), patchi)
+    {
+        if (c[i].boundaryField()[patchi].type() == "chargeBalancedConcentration")
+            c[i].boundaryFieldRef()[patchi].evaluate();
+    }
+}
+
 // Reaction chemistry is constructed only after all concentration fields exist.
 // reactionManager owns reaction definitions/stoichiometry/model instances, while
 // the physical concentration fields remain owned by createFields/the solver.

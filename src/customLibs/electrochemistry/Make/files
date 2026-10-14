@@ -1,7 +1,9 @@
 derivedFvPatchFields/MolarFlux/galvanostaticMolarFlux.C
 derivedFvPatchFields/PotentialFlux/galvanostaticPotentialFlux.C
+derivedFvPatchFields/PotentialFlux/zeroCurrentPotentialFlux.C
 derivedFvPatchFields/MolarConcentration/inertMolarConcentration.C
 derivedFvPatchFields/MolarConcentration/pHMolarConcentration.C
+derivedFvPatchFields/MolarConcentration/chargeBalancedConcentration.C
 
 LIB = $(FOAM_USER_LIBBIN)/libCustomBCs
 
