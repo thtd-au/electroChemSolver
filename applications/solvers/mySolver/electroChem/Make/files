@@ -4,8 +4,9 @@ reactionModels/reactionManager/reactionManager.C
 reactionModels/multiplicativeMonod/multiplicativeMonod.C
 reactionModels/reversibleKineticReaction/reversibleKineticReaction.C
 reactionModels/fastEquilibriumReaction/fastEquilibriumReaction.C
-
 potentialModels/potentialManager/potentialManager.C
 potentialModels/electroneutralGalvanostatic/electroneutralGalvanostatic.C
+currentModels/currentManager/currentManager.C
+currentModels/constantCurrent/constantCurrent.C
 
 EXE = $(FOAM_USER_APPBIN)/electroChem

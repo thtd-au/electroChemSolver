@@ -10,7 +10,6 @@ namespace Foam
 class electroneutralGalvanostatic : public potentialModel
 {
     const dictionary& potentialDict_;
-    scalar appliedCurrentDensity_;
     scalar referencePotential_;
     word referencePatchName_;
     label referencePatchID_;

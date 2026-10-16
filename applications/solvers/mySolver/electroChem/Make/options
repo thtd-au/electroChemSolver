@@ -5,6 +5,8 @@ EXE_INC = \
     -IreactionModels/fastEquilibriumReaction \
     -IpotentialModels/potentialManager \
     -IpotentialModels/electroneutralGalvanostatic \
+    -IcurrentModels/currentManager \
+    -IcurrentModels/constantCurrent \
     -I$(LIB_SRC)/finiteVolume/lnInclude \
     -I$(LIB_SRC)/meshTools/lnInclude \
     -I$(LIB_SRC)/dynamicFvMesh/lnInclude \

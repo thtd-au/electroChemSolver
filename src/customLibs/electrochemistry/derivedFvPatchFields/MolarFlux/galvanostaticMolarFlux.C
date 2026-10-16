@@ -4,6 +4,7 @@
 #include "fvPatchFields.H"
 #include "fvPatchFieldMapper.H"
 #include "volFields.H"
+#include "surfaceFields.H"
 #include "IOdictionary.H"
 
 namespace Foam
@@ -188,18 +189,10 @@ void galvanostaticMolarFlux::updateCoeffs()
         electroChemistry.subDict("potential");
 
     const bool potentialActive = potentialDict.get<word>("model") != "none";
-    const scalar currentDensity = potentialDict.get<scalar>("appliedCurrentDensity");
 
     const scalar T = electroChemistry.get<scalar>("temperature");
     const scalar F = electroChemistry.get<scalar>("FaradayConstant");
     const scalar R = 8.31446261815324;
-
-    if (currentDensity < 0.0)
-    {
-        FatalIOErrorInFunction(potentialDict)
-            << "appliedCurrentDensity must be non-negative"
-            << exit(FatalIOError);
-    }
 
     if (T <= SMALL || F <= SMALL)
     {
@@ -238,11 +231,27 @@ void galvanostaticMolarFlux::updateCoeffs()
         beta[facei] = zi*F/(R*T)*snGradPhiE[facei];
     }
 
-    // dc/dn = A - beta*c_b
-    // A = nu_i*j_app/(|nu_e|*F*D_i)
-    const scalar A =
-        speciesStoichCoeff_*currentDensity
-       /(mag(electronStoichCoeff)*F*Di);
+    if (!mesh.foundObject<surfaceScalarField>("electrodeCurrentDensity"))
+    {
+        FatalErrorInFunction
+            << "galvanostaticMolarFlux requires the registered "
+            << "electrodeCurrentDensity field supplied by currentManager."
+            << exit(FatalError);
+    }
+    const surfaceScalarField& electrodeCurrentDensity =
+        mesh.lookupObject<surfaceScalarField>("electrodeCurrentDensity");
+    const fvsPatchScalarField& jnApplied =
+        electrodeCurrentDensity.boundaryField()[patch().index()];
+
+    // N_i dot n = nu_i*j_n/(nu_e*F).
+    // dc_i/dn = A - beta*c_b, A = -nu_i*j_n/(nu_e*F*D_i).
+    // This remains valid for signed, spatially varying model currents.
+    scalarField A(patch().size(), 0.0);
+    forAll(A, facei)
+    {
+        A[facei] = -speciesStoichCoeff_*jnApplied[facei]
+            /(electronStoichCoeff*F*Di);
+    }
 
     scalarField denominator(delta + beta);
 

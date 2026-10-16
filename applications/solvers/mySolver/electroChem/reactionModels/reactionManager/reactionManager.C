@@ -1086,7 +1086,16 @@ void reactionManager::applyTransportMatrixCorrection
             << " localCell=" << localLimiterCell
             << " centre=" << mesh_.C()[localLimiterCell] << nl;
 
-    Info<< "    relaxation factor = " << alpha << nl;
+    scalar maxAbsDeltaLambda = 0.0;
+    forAll(direction, r)
+        forAll(direction[r], celli)
+            maxAbsDeltaLambda = max(maxAbsDeltaLambda, mag(direction[r][celli]));
+    reduce(maxAbsDeltaLambda, maxOp<scalar>());
+
+    Info<< "    max|deltalambda|=" << maxAbsDeltaLambda << " mol/m3/s"
+        << ", relaxation=" << alpha
+        << ", applied max|alpha*deltalambda|="
+        << alpha*maxAbsDeltaLambda << " mol/m3/s" << nl;
 
     forAll(lambda_, r)
     {
@@ -1118,7 +1127,7 @@ void reactionManager::readOutputControls()
 
 void reactionManager::reportNoEquilibriumCorrection(const char* reason) const
 {
-    if (nEquilibriumReactions())
+    if (nEquilibriumReactions() && !equilibriumConverged_)
         Info<< "    relaxation factor = not applied (" << reason << ')' << nl;
 }
 
@@ -1241,7 +1250,7 @@ void reactionManager::reportEquilibrium() const
         return;
     }
 
-    Info<< "Equilibrium residuals: converged="
+    Info<< "    Equilibrium residuals: converged="
         << (equilibriumConverged_ ? "yes" : "no") << nl;
     forAll(equilibriumReactionIndices_, r)
     {

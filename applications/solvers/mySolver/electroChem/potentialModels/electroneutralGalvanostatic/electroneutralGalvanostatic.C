@@ -35,7 +35,6 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
 :
     potentialModel(mesh, electroChemistry, reactions, species, c, phiE, T, Rgas, F),
     potentialDict_(electroChemistry.subDict("potential")),
-    appliedCurrentDensity_(potentialDict_.get<scalar>("appliedCurrentDensity")),
     referencePotential_(potentialDict_.get<scalar>("referencePotential")),
     referencePatchName_(potentialDict_.get<word>("referencePatch")),
     referencePatchID_(mesh.boundaryMesh().findPatchID(referencePatchName_)),
@@ -65,12 +64,6 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
     kappaFace_(nullptr),
     jDiffFlux_(nullptr)
 {
-    if (appliedCurrentDensity_ < 0.0)
-    {
-        FatalIOErrorInFunction(potentialDict_)
-            << "appliedCurrentDensity must be non-negative"
-            << exit(FatalIOError);
-    }
     if (minConductivity_ <= 0.0)
     {
         FatalIOErrorInFunction(potentialDict_)
@@ -420,7 +413,7 @@ void electroneutralGalvanostatic::report() const
     }
     reduce(maxAbs, maxOp<scalar>());
     reduce(maxRel, maxOp<scalar>());
-    Info<< "Electroneutrality: converged="
+    Info<< "    Electroneutrality: converged="
         << (evaluated_ && converged_ ? "yes" : "no") << nl
         << "    max|E|=" << maxAbs << " mol/m3, max relative=" << maxRel
         << ", absTol=" << absTol_ << ", relTol=" << relTol_ << nl;

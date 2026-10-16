@@ -708,6 +708,10 @@ volScalarField phiE
     mesh
 );
 
+// Register and populate the shared electrode currents before any boundary
+// evaluation, including the potential/model none initialization below.
+currentManager currentMgr(mesh, electroChemistry, phiE);
+
 if (!potentialActive)
 {
     // Preserve patch types and electrode metadata while clearing the field.

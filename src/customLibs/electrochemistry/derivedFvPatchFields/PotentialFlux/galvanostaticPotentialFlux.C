@@ -150,12 +150,6 @@ void galvanostaticPotentialFlux::updateCoeffs()
         return;
     }
 
-    const scalar currentDensity =
-        potentialDict.get<scalar>
-        (
-            "appliedCurrentDensity"
-        );
-
     const scalar minKappa =
         potentialDict.getOrDefault<scalar>
         (
@@ -163,14 +157,17 @@ void galvanostaticPotentialFlux::updateCoeffs()
             SMALL
         );
 
-    if (currentDensity < 0.0)
+    if (!mesh.foundObject<surfaceScalarField>("electrodeCurrentDensity"))
     {
-        FatalIOErrorInFunction(potentialDict)
-            << "appliedCurrentDensity must be non-negative"
-            << exit(FatalIOError);
+        FatalErrorInFunction
+            << "galvanostaticPotentialFlux requires the registered "
+            << "electrodeCurrentDensity field supplied by currentManager."
+            << exit(FatalError);
     }
+    const surfaceScalarField& electrodeCurrentDensity =
+        mesh.lookupObject<surfaceScalarField>("electrodeCurrentDensity");
 
-    // Authoritative face-current fields supplied by the active potential model.
+    // Diffusion-current and conductivity fields belong to the potential model.
     if
     (
         !mesh.foundObject<surfaceScalarField>("jDiffFlux")
@@ -208,14 +205,9 @@ void galvanostaticPotentialFlux::updateCoeffs()
     const fvsPatchScalarField& magSfPatch =
         mesh.magSf().boundaryField()[patchi];
 
-    // Direction-aware applied normal ionic current:
-    //
-    //   j_n,app = -nu_e/|nu_e| * j_app
-    //
-    const scalar jnApplied =
-       -electronStoichCoeff_
-       /mag(electronStoichCoeff_)
-       *currentDensity;
+    // Signed outward ionic current density [A/m2], shared with species BCs.
+    const fvsPatchScalarField& jnApplied =
+        electrodeCurrentDensity.boundaryField()[patchi];
 
     scalarField patchGradient
     (
@@ -265,7 +257,7 @@ void galvanostaticPotentialFlux::updateCoeffs()
         // => d(phi)/dn
         //      = (jDiff_n - j_n,app)/kappa
         patchGradient[facei] =
-            (jDiffNormal - jnApplied)
+            (jDiffNormal - jnApplied[facei])
            /kappaF;
     }
 

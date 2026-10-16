@@ -9,6 +9,7 @@
 #include "fvcSmooth.H"
 #include "reactionManager.H"
 #include "potentialManager.H"
+#include "currentManager.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -196,6 +197,11 @@ int main(int argc, char *argv[])
 
             Info<< "Picard state " << testedPicardStates
                 << '/' << maxPicardIter << nl;
+
+            // Refresh prescribed currents after any mesh update and freeze
+            // them for the complete species sweep. constantCurrent requires
+            // no nonlinear correction or additional convergence condition.
+            currentMgr.correct();
 
             // One common kinetic state for the complete species sweep.
             reactionMgr.updateKineticRates();
