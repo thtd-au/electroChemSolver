@@ -89,6 +89,8 @@ int main(int argc, char *argv[])
     scalar electroneutralityTotalUsed = 0.0;
     label equilibriumMaxUsed = 0;
     scalar equilibriumTotalUsed = 0.0;
+    label currentMaxUsed = 0;
+    scalar currentTotalUsed = 0.0;
 
     while (runTime.run())
     {
@@ -190,6 +192,7 @@ int main(int argc, char *argv[])
         label testedPicardStates = 0;
         label electroneutralityLastFailed = 0;
         label equilibriumLastFailed = 0;
+        label currentLastFailed = 0;
 
         for (label picardI = 0; picardI < maxPicardIter; ++picardI)
         {
@@ -198,9 +201,8 @@ int main(int argc, char *argv[])
             Info<< "Picard state " << testedPicardStates
                 << '/' << maxPicardIter << nl;
 
-            // Refresh prescribed currents after any mesh update and freeze
-            // them for the complete species sweep. constantCurrent requires
-            // no nonlinear correction or additional convergence condition.
+            // Solve electrode metal potentials at frozen phiE, then freeze
+            // the shared face currents for the complete species sweep.
             currentMgr.correct();
 
             // One common kinetic state for the complete species sweep.
@@ -213,19 +215,25 @@ int main(int argc, char *argv[])
             // Both constraints are evaluated on this SAME transported state.
             reactionMgr.evaluateEquilibrium();
             potentialMgr.evaluateConstraint();
+            if (currentMgr.requiresPotentialCoupling())
+                potentialMgr.refreshDiagnosticCurrent();
+            currentMgr.evaluateConstraint();
 
+            const bool currentOK = currentMgr.converged();
             const bool equilibriumOK = reactionMgr.equilibriumConverged();
             const bool electroneutralityOK = potentialMgr.converged();
             if (!electroneutralityOK) electroneutralityLastFailed = testedPicardStates;
             if (!equilibriumOK) equilibriumLastFailed = testedPicardStates;
+            if (!currentOK) currentLastFailed = testedPicardStates;
 
             const bool finalState = picardI == maxPicardIter - 1;
-            const bool constraintsOK = equilibriumOK && electroneutralityOK;
+            const bool constraintsOK = equilibriumOK && electroneutralityOK && currentOK;
 
             // Keep each constraint report adjacent to its applied correction.
+            currentMgr.report();
             potentialMgr.report();
-            if (!electroneutralityOK && !finalState)
-                potentialMgr.correct();
+            if ((!electroneutralityOK || !currentOK) && !finalState)
+                potentialMgr.correct(!currentOK);
 
             reactionMgr.reportEquilibrium();
             if (!equilibriumOK && !finalState)
@@ -253,6 +261,7 @@ int main(int argc, char *argv[])
                 << testedPicardStates << " transported states:" << nl;
             reactionMgr.reportEquilibrium();
             potentialMgr.report();
+            currentMgr.report();
 
             FatalErrorInFunction
                 << "Electrochemical Picard loop failed to converge after "
@@ -278,6 +287,13 @@ int main(int argc, char *argv[])
             const label used = equilibriumLastFailed + 1;
             equilibriumMaxUsed = max(equilibriumMaxUsed, used);
             equilibriumTotalUsed += used;
+        }
+
+        if (currentMgr.requiresPotentialCoupling())
+        {
+            const label used = currentLastFailed + 1;
+            currentMaxUsed = max(currentMaxUsed, used);
+            currentTotalUsed += used;
         }
 
         updatePotentialOutput();
@@ -352,6 +368,8 @@ int main(int argc, char *argv[])
         electroneutralityMaxUsed, electroneutralityTotalUsed);
     reportConstraintIterations("equilibrium", reactionMgr.nEquilibriumReactions() > 0,
         equilibriumMaxUsed, equilibriumTotalUsed);
+    reportConstraintIterations("ButlerVolmer", currentMgr.requiresPotentialCoupling(),
+        currentMaxUsed, currentTotalUsed);
 
     Info<< "End\n" << endl;
 

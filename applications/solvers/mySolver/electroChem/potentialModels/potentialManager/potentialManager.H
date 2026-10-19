@@ -118,7 +118,7 @@ public:
 
     virtual void evaluateConstraint() = 0;
     virtual bool converged() const = 0;
-    virtual void correct() = 0;
+    virtual void correct(const bool force = false) = 0;
     virtual void report() const = 0;
     virtual const scalarField& chargeResidual() const = 0;
     virtual const scalarField& chargeScale() const = 0;
@@ -150,7 +150,7 @@ public:
 
     void evaluateConstraint() { model_->evaluateConstraint(); }
     bool converged() const { return model_->converged(); }
-    void correct() { model_->correct(); }
+    void correct(const bool force = false) { model_->correct(force); }
     void report() const { model_->report(); }
     const scalarField& chargeResidual() const { return model_->chargeResidual(); }
     const scalarField& chargeScale() const { return model_->chargeScale(); }

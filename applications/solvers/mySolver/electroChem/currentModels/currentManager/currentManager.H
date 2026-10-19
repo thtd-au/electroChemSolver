@@ -52,6 +52,10 @@ public:
     );
 
     virtual void correct() = 0;
+    virtual bool requiresPotentialCoupling() const { return false; }
+    virtual void evaluateConstraint() {}
+    virtual bool converged() const { return true; }
+    virtual void report() const {}
 
     const surfaceScalarField& electrodeCurrentDensity() const
     {
@@ -73,6 +77,13 @@ public:
     );
 
     void correct() { model_->correct(); }
+    bool requiresPotentialCoupling() const
+    {
+        return model_->requiresPotentialCoupling();
+    }
+    void evaluateConstraint() { model_->evaluateConstraint(); }
+    bool converged() const { return model_->converged(); }
+    void report() const { model_->report(); }
 
     const surfaceScalarField& electrodeCurrentDensity() const
     {

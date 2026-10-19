@@ -55,7 +55,7 @@ public:
 
     virtual void evaluateConstraint();
     virtual bool converged() const;
-    virtual void correct();
+    virtual void correct(const bool force = false);
     virtual void report() const;
     virtual const scalarField& chargeResidual() const { return chargeResidual_; }
     virtual const scalarField& chargeScale() const { return chargeScale_; }

@@ -8,6 +8,7 @@
 #include "fvcLaplacian.H"
 #include "fvmLaplacian.H"
 #include "PstreamReduceOps.H"
+#include <limits>
 
 namespace Foam
 {
@@ -270,7 +271,15 @@ void electroneutralGalvanostatic::evaluateConstraint()
         chargeResidual_[celli] = E;
         chargeScale_[celli] = max(ionic, absTol_);
 
-        if (!(mag(E) <= absTol_ || mag(E)/chargeScale_[celli] <= relTol_))
+        // E is a cancellation of ionic concentrations. Allow only floating-
+        // point roundoff on that concentration scale at the tolerance edge.
+        // This is not an additional physical electroneutrality tolerance.
+        const scalar roundoff =
+            scalar(2*(c_.size() + 1))
+           *std::numeric_limits<scalar>::epsilon()*chargeScale_[celli];
+        const scalar allowed = max(absTol_, relTol_*chargeScale_[celli]);
+
+        if (!(mag(E) <= allowed + roundoff))
         {
             converged_ = false;
         }
@@ -326,7 +335,7 @@ void electroneutralGalvanostatic::setCorrectionBoundaryConditions
     }
 }
 
-void electroneutralGalvanostatic::correct()
+void electroneutralGalvanostatic::correct(const bool force)
 {
     if (!evaluated_)
     {
@@ -334,7 +343,9 @@ void electroneutralGalvanostatic::correct()
             << "correct() requires a transported state evaluated first"
             << exit(FatalError);
     }
-    if (converged_) return;
+    // BV boundary-current consistency may require another current-conservation
+    // solve even when the deliberately relaxed neutrality test already passes.
+    if (converged_ && !force) return;
 
     updateCurrentFields();
 
@@ -405,18 +416,28 @@ void electroneutralGalvanostatic::report() const
 {
     scalar maxAbs = 0.0;
     scalar maxRel = 0.0;
+    scalar maxRoundoff = 0.0;
     forAll(chargeResidual_, celli)
     {
         maxAbs = max(maxAbs, mag(chargeResidual_[celli]));
         maxRel = max(maxRel,
             mag(chargeResidual_[celli])/chargeScale_[celli]);
+        maxRoundoff = max
+        (
+            maxRoundoff,
+            scalar(2*(c_.size() + 1))
+           *std::numeric_limits<scalar>::epsilon()*chargeScale_[celli]
+        );
     }
     reduce(maxAbs, maxOp<scalar>());
     reduce(maxRel, maxOp<scalar>());
+    reduce(maxRoundoff, maxOp<scalar>());
     Info<< "    Electroneutrality: converged="
         << (evaluated_ && converged_ ? "yes" : "no") << nl
         << "    max|E|=" << maxAbs << " mol/m3, max relative=" << maxRel
-        << ", absTol=" << absTol_ << ", relTol=" << relTol_ << nl;
+        << ", absTol=" << absTol_ << ", relTol=" << relTol_ << nl
+        << "    max comparison roundoff allowance=" << maxRoundoff
+        << " mol/m3" << nl;
 }
 
 } // End namespace Foam

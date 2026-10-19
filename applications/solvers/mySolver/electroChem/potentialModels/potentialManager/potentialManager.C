@@ -57,7 +57,7 @@ public:
     {}
     void evaluateConstraint() override {}
     bool converged() const override { return true; }
-    void correct() override {}
+    void correct(const bool force = false) override {}
     void report() const override {}
     const scalarField& chargeResidual() const override { return residual_; }
     const scalarField& chargeScale() const override { return scale_; }
