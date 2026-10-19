@@ -8,6 +8,7 @@ EXE_INC = \
     -IcurrentModels/currentManager \
     -IcurrentModels/constantCurrent \
     -IcurrentModels/ButlerVolmer \
+    -IcurrentModels/concentrationButlerVolmer \
     -I$(LIB_SRC)/finiteVolume/lnInclude \
     -I$(LIB_SRC)/meshTools/lnInclude \
     -I$(LIB_SRC)/dynamicFvMesh/lnInclude \

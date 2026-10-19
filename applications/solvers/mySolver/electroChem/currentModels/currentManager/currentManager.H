@@ -56,6 +56,8 @@ public:
     virtual void evaluateConstraint() {}
     virtual bool converged() const { return true; }
     virtual void report() const {}
+    // Optional accepted-state output; no electrode kinetics in constantCurrent.
+    virtual void writeDiagnostics() {}
 
     const surfaceScalarField& electrodeCurrentDensity() const
     {
@@ -84,6 +86,7 @@ public:
     void evaluateConstraint() { model_->evaluateConstraint(); }
     bool converged() const { return model_->converged(); }
     void report() const { model_->report(); }
+    void writeDiagnostics() { model_->writeDiagnostics(); }
 
     const surfaceScalarField& electrodeCurrentDensity() const
     {

@@ -301,7 +301,7 @@ int main(int argc, char *argv[])
         const auto printScalarStats = [&](const word& name,
             const scalarField& values, const char* units)
         {
-            Info<< "    " << name << " min/mean/max [" << units << "]: "
+            Info<< "  " << name << " min/mean/max [" << units << "]: "
                 << gMin(values) << " / "
                 << gSum(values*mesh.V())/gSum(mesh.V()) << " / "
                 << gMax(values) << nl;
@@ -309,7 +309,7 @@ int main(int argc, char *argv[])
         const auto printVectorStats = [&](const word& name,
             const vectorField& values, const boolList& directions, const char* units)
         {
-            Info<< "    " << name << " components:" << nl;
+            Info<< "  " << name << " components:" << nl;
             for (direction cmpt = 0; cmpt < vector::nComponents; ++cmpt)
             {
                 if (!directions[cmpt]) continue;
@@ -318,7 +318,25 @@ int main(int argc, char *argv[])
                 printScalarStats(componentName, componentValues, units);
             }
         };
-        if (printPhiE || printGradPhiE || printKappa || printJDiff)
+        bool printElectrodePotentialStats = false;
+        if (runTime.controlDict().found("potential"))
+        {
+            const dictionary& d = runTime.controlDict().subDict("potential");
+            if (d.found("print") && currentMgr.requiresPotentialCoupling())
+            {
+                const dictionary& p = d.subDict("print");
+                printElectrodePotentialStats =
+                    p.getOrDefault<Switch>("phiS", false)
+                 || p.getOrDefault<Switch>("Eeq", false)
+                 || p.getOrDefault<Switch>("eta", false)
+                 || p.getOrDefault<Switch>("cellVoltage", false)
+                 || p.getOrDefault<Switch>("voltageBudget", false)
+                 || p.getOrDefault<Switch>("Eref", false)
+                 || p.getOrDefault<Switch>("etaRef", false);
+            }
+        }
+        if (printPhiE || printGradPhiE || printKappa || printJDiff
+         || printElectrodePotentialStats)
         {
             Info<< "Potential field statistics:" << nl;
             if (printPhiE) printScalarStats("phiE", phiE.primitiveField(), "V");
@@ -326,6 +344,8 @@ int main(int argc, char *argv[])
             if (printKappa) printScalarStats("kappa", kappaOutput.primitiveField(), "S/m");
             if (printJDiff) printVectorStats("jDiff", jDiffOutput.primitiveField(), printJDiffDirections, "A/m2");
         }
+
+        currentMgr.writeDiagnostics();
 
         // Optional summary of the final transport state before clipping.
         if (printCFieldsBeforeClipping)

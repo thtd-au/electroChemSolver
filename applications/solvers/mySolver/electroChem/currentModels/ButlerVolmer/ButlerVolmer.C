@@ -5,6 +5,7 @@
 #include "IStringStream.H"
 #include "PstreamReduceOps.H"
 #include "token.H"
+#include "OSspecific.H"
 #include <algorithm>
 #include <stdexcept>
 #include <cmath>
@@ -59,6 +60,26 @@ Root<Real> solve
     Real currentTolerance, Real initial, Real initialSpan, int maxIterations
 )
 {
+    const Real negInf = -std::numeric_limits<Real>::infinity();
+    if ((!std::isfinite(logA) && logA != negInf)
+     || (!std::isfinite(logC) && logC != negInf))
+        throw std::runtime_error("Invalid integrated BV coefficients");
+    if (logA == negInf && logC == negInf)
+    {
+        if (target == Real(0)) return {initial,0};
+        throw std::runtime_error("Both BV branches are depleted: target current is infeasible");
+    }
+    if (logA == negInf || logC == negInf)
+    {
+        if ((logA == negInf && target >= Real(0))
+         || (logC == negInf && target <= Real(0)))
+            throw std::runtime_error("Target current has no finite root with the remaining BV branch");
+        const Real x = logC == negInf
+            ? (std::log(target)-logA)/a
+            : (logC-std::log(-target))/c;
+        if (!std::isfinite(x)) throw std::runtime_error("Non-finite single-branch BV root");
+        return {x,1};
+    }
     Real span = initialSpan;
     Real lo = initial-span, hi = initial+span;
     int expanded = 0;
@@ -119,6 +140,23 @@ Real localCurrent(Real i0, Real a, Real c, Real eta)
     return std::exp(std::log(i0)+a*eta)-std::exp(std::log(i0)-c*eta);
 }
 
+// Exact branch extinction is represented by log(C)=-infinity, without a floor.
+template<class Real>
+Real weightedCurrent(Real i0, Real a, Real c, Real etaRef, Real logCa, Real logCc)
+{
+    if (logCa == Real(0) && logCc == Real(0))
+        return localCurrent(i0,a,c,etaRef);
+    if (!std::isfinite(etaRef)) throw std::runtime_error("Non-finite reference overpotential");
+    const Real lp=std::log(i0)+logCa+a*etaRef;
+    const Real ln=std::log(i0)+logCc-c*etaRef;
+    const Real negInf=-std::numeric_limits<Real>::infinity();
+    if (lp == negInf && ln == negInf) return Real(0);
+    if (std::max(lp,ln)>std::log(std::numeric_limits<Real>::max())-Real(4))
+        throw std::runtime_error("Concentration-dependent BV current exceeds scalar range");
+    if (lp>=ln) return std::exp(lp)*(-std::expm1(ln-lp));
+    return std::exp(ln)*std::expm1(lp-ln);
+}
+
 // Statistics use the area-weighted inner product over both electrodes.
 template<class Real>
 Real aitkenFactor
@@ -141,6 +179,26 @@ Real aitkenFactor
             : std::max(lower, Real(0.5)*omega);
     }
     return omega;
+}
+
+template<class Real> struct VoltageBudget
+{
+    Real cell, equilibrium, activation, electrolyte, excess, closure;
+};
+
+template<class Real>
+VoltageBudget<Real> voltageBudget
+(
+    Real phiSa, Real phiSc, Real Eqa, Real Eqc,
+    Real etaMeanA, Real etaMeanC, Real phiEMeanA, Real phiEMeanC
+)
+{
+    const Real cell = phiSa-phiSc;
+    const Real equilibrium = Eqa-Eqc;
+    const Real activation = etaMeanA-etaMeanC;
+    const Real electrolyte = phiEMeanA-phiEMeanC;
+    return {cell, equilibrium, activation, electrolyte, cell-equilibrium,
+        cell-equilibrium-activation-electrolyte};
 }
 
 } // namespace electroChemBV
@@ -167,9 +225,16 @@ addToRunTimeSelectionTable(currentModel, ButlerVolmer, dictionary);
 
 ButlerVolmer::ButlerVolmer
 (
-    fvMesh& mesh,
-    const dictionary& currentDict,
-    const volScalarField& phiE
+    fvMesh& mesh, const dictionary& currentDict, const volScalarField& phiE
+)
+:
+    ButlerVolmer(mesh, currentDict, phiE, true, false)
+{}
+
+ButlerVolmer::ButlerVolmer
+(
+    fvMesh& mesh, const dictionary& currentDict, const volScalarField& phiE,
+    const bool initialise, const bool referenceState
 )
 :
     currentModel(mesh, currentDict, phiE),
@@ -190,6 +255,7 @@ ButlerVolmer::ButlerVolmer
     boundaryResidual_(electrodeNames_.size(), 0),
     rootIterations_(electrodeNames_.size(), 0),
     T_(0), F_(0), R_(8.31446261815324),
+    referenceState_(referenceState),
     absTol_(0), relTol_(0), rootAbsTol_(0), rootRelTol_(0),
     rootMaxIter_(100), currentRelaxation_(1),
     relaxationMethod_("fixed"),
@@ -275,12 +341,8 @@ ButlerVolmer::ButlerVolmer
         i0_[e] = electrode.get<scalar>("i0");
         alphaA_[e] = electrode.get<scalar>("alpha_a");
         alphaC_[e] = electrode.get<scalar>("alpha_c");
-        const dictionary& eq = electrode.subDict("equilibriumPotential");
-        if (eq.get<word>("model") != "constant")
-            FatalIOErrorInFunction(eq)
-                << "Only equilibriumPotential/model constant is implemented"
-                << exit(FatalIOError);
-        Eeq_[e] = eq.get<scalar>("Eeq");
+        // Eeq_ stores the prescribed Eref in reference-state kinetics.
+        Eeq_[e] = electrode.get<scalar>(referenceState_ ? "Eref" : "Eeq");
         if
         (
             !finitePositive(i0_[e]) || !finitePositive(alphaA_[e])
@@ -309,7 +371,17 @@ ButlerVolmer::ButlerVolmer
                 << exit(FatalIOError);
     }
     // No kappa or diffusion-current field is needed for this initial root.
-    correct();
+    if (initialise) correct();
+}
+
+void ButlerVolmer::logConcentrationFactors
+(
+    const label e, scalarField& logCa, scalarField& logCc
+) const
+{
+    const label n=phiE_.boundaryField()[patchIDs_[e]].size();
+    logCa.setSize(n,0); logCc.setSize(n,0);
+    logCa=scalar(0); logCc=scalar(0);
 }
 
 scalar ButlerVolmer::currentTolerance(const scalar value) const
@@ -365,8 +437,11 @@ void ButlerVolmer::correct()
         const scalar phiRef = gSum(areas*scalarField(p))/area_[e] + Eeq_[e];
         const scalar a = alphaA_[e]*F_/(R_*T_);
         const scalar c = alphaC_[e]*F_/(R_*T_);
+        scalarField logCa, logCc;
+        logConcentrationFactors(e, logCa, logCc);
         scalarField logTermsA(p.size(), 0), logTermsC(p.size(), 0);
-        scalar maxA = -GREAT, maxC = -GREAT;
+        const scalar negInf=-std::numeric_limits<scalar>::infinity();
+        scalar maxA=negInf, maxC=negInf;
         forAll(p, f)
         {
             if (!finitePositive(areas[f]) || !std::isfinite(p[f]))
@@ -374,8 +449,8 @@ void ButlerVolmer::correct()
                     << electrodeNames_[e] << " face " << f << exit(FatalError);
             const scalar delta = phiRef-p[f]-Eeq_[e];
             const scalar logWeight = std::log(i0_[e]) + std::log(areas[f]);
-            logTermsA[f] = logWeight+a*delta;
-            logTermsC[f] = logWeight-c*delta;
+            logTermsA[f] = logWeight+logCa[f]+a*delta;
+            logTermsC[f] = logWeight+logCc[f]-c*delta;
             maxA = max(maxA, logTermsA[f]);
             maxC = max(maxC, logTermsC[f]);
         }
@@ -384,13 +459,13 @@ void ButlerVolmer::correct()
         scalar sumA = 0, sumC = 0;
         forAll(p, f)
         {
-            sumA += std::exp(logTermsA[f]-maxA);
-            sumC += std::exp(logTermsC[f]-maxC);
+            if (std::isfinite(maxA)) sumA += std::exp(logTermsA[f]-maxA);
+            if (std::isfinite(maxC)) sumC += std::exp(logTermsC[f]-maxC);
         }
         reduce(sumA, sumOp<scalar>());
         reduce(sumC, sumOp<scalar>());
-        const scalar logA = maxA+std::log(sumA);
-        const scalar logC = maxC+std::log(sumC);
+        const scalar logA = sumA>0 ? maxA+std::log(sumA) : negInf;
+        const scalar logC = sumC>0 ? maxC+std::log(sumC) : negInf;
         targetCurrent_[e] = (nuE_[e] > 0 ? 1 : -1)*systemCurrent;
         // Always solve the controller more tightly than the outer test.
         const scalar rootTolerance = min
@@ -412,8 +487,8 @@ void ButlerVolmer::correct()
             const scalarField previousCurrent(jn);
             scalarField candidate(jn.size(), 0);
             forAll(jn, f)
-                candidate[f] = -electroChemBV::localCurrent
-                    (i0_[e], a, c, phiS_[e]-p[f]-Eeq_[e]);
+                candidate[f] = -electroChemBV::weightedCurrent
+                    (i0_[e], a, c, phiS_[e]-p[f]-Eeq_[e], logCa[f], logCc[f]);
             // Remove only the root/roundoff integral error. The final BV
             // acceptance check still compares against the unmodified BV law.
             candidate += (-targetCurrent_[e]-gSum(candidate*areas))/area_[e];
@@ -486,6 +561,8 @@ void ButlerVolmer::evaluateConstraint()
         const scalarField& areas = mesh_.magSf().boundaryField()[patchi];
         const scalar a = alphaA_[e]*F_/(R_*T_);
         const scalar c = alphaC_[e]*F_/(R_*T_);
+        scalarField logCa, logCc;
+        logConcentrationFactors(e, logCa, logCc);
         bvResidual_[e] = 0;
         boundaryResidual_[e] = 0;
         scalar total = 0;
@@ -493,8 +570,8 @@ void ButlerVolmer::evaluateConstraint()
         {
             forAll(jn, f)
             {
-                const scalar bv = electroChemBV::localCurrent
-                    (i0_[e],a,c,phiS_[e]-p[f]-Eeq_[e]);
+                const scalar bv = electroChemBV::weightedCurrent
+                    (i0_[e],a,c,phiS_[e]-p[f]-Eeq_[e],logCa[f],logCc[f]);
                 const scalar kappa = conductivity.boundaryField()[patchi][f];
                 if (!finitePositive(kappa) || !finitePositive(areas[f]))
                     FatalErrorInFunction << "Invalid conductivity/area on electrode "
@@ -540,17 +617,210 @@ bool ButlerVolmer::converged() const
 
 void ButlerVolmer::report() const
 {
-    Info<< "    ButlerVolmer: converged=" << (evaluated_ && converged_ ? "yes" : "no") << nl;
-    Info<< "    current relaxation=" << activeRelaxation_
-        << " (" << relaxationMethod_ << ")" << nl;
+    Info<< "    " << type() << ": converged=" << (evaluated_ && converged_ ? "yes" : "no") << nl;
+    bool commonRootIterations = true;
+    forAll(rootIterations_, e)
+        if (rootIterations_[e] != rootIterations_[0]) commonRootIterations = false;
     forAll(electrodeNames_, e)
     {
         Info<< "    " << electrodeNames_[e] << ": phiS=" << phiS_[e]
-            << " V, I_applied/target=" << actualCurrent_[e] << " / " << targetCurrent_[e]
-            << " A, root iterations=" << rootIterations_[e] << nl
-            << "    max BV residual=" << bvResidual_[e]
-            << ", max ionic boundary residual=" << boundaryResidual_[e]
-            << " A/m2" << nl;
+            << " V, max BV residual=" << bvResidual_[e]
+            << " A/m2, max ionic boundary residual=" << boundaryResidual_[e]
+            << " A/m2";
+        if (!commonRootIterations) Info<< ", root iterations=" << rootIterations_[e];
+        Info<< nl;
+    }
+    Info<< "    relaxation=" << activeRelaxation_ << " (" << relaxationMethod_ << ")";
+    if (commonRootIterations) Info<< ", root iterations=" << rootIterations_[0];
+    Info<< nl;
+}
+
+
+void ButlerVolmer::writeDiagnostics()
+{
+    // Accepted-state diagnostics only. Never solve a root or evaluate a BC here.
+    const dictionary& control=mesh_.time().controlDict();
+    if (!control.found("potential")) return;
+    const dictionary& settings=control.subDict("potential");
+    const dictionary* print=settings.found("print") ? &settings.subDict("print") : nullptr;
+    const dictionary* write=settings.found("write") ? &settings.subDict("write") : nullptr;
+    const auto enabled=[](const dictionary* d,const word& key)
+    { return d && d->getOrDefault<Switch>(key,false); };
+    const bool printPhiS=enabled(print,"phiS"), printEq=enabled(print,"Eeq");
+    const bool printEta=enabled(print,"eta"), printCell=enabled(print,"cellVoltage");
+    const bool printBudget=enabled(print,"voltageBudget");
+    const bool printRef=enabled(print,"Eref"), printEtaRef=enabled(print,"etaRef");
+    const bool writePhiS=enabled(write,"phiS"), writeEq=enabled(write,"Eeq");
+    const bool writeEta=enabled(write,"eta"), writeCell=enabled(write,"cellVoltage");
+    const bool writeRef=enabled(write,"Eref"), writeEtaRef=enabled(write,"etaRef");
+    const bool outputTime=mesh_.time().writeTime();
+    const bool writeElectrodes=outputTime && (writePhiS||writeEq||writeEta||writeRef||writeEtaRef);
+    if (!(printPhiS||printEq||printEta||printCell||printBudget||printRef||printEtaRef
+       ||writeElectrodes||(outputTime&&writeCell))) return;
+    if (!evaluated_||!converged_)
+        FatalErrorInFunction << "Electrode output requires an accepted current state" << exit(FatalError);
+
+    const scalar nan=std::numeric_limits<scalar>::quiet_NaN();
+    const label n=electrodeNames_.size();
+    scalarList meanPhiE(n,0), meanEq(n,0), meanEta(n,0), meanEtaRef(n,0);
+    scalarList minEta(n,GREAT),maxEta(n,-GREAT);
+    List<bool> equilibriumValid(n,true);
+    List<scalarField> eqFaces(n),etaFaces(n),etaRefFaces(n),validFaces(n);
+    label anode=-1,cathode=-1;
+    forAll(electrodeNames_,e)
+    {
+        if (nuE_[e]>0) anode=e; else cathode=e;
+        const label patchi=patchIDs_[e];
+        const scalarField& areas=mesh_.magSf().boundaryField()[patchi];
+        const fvPatchScalarField& p=phiE_.boundaryField()[patchi];
+        const scalar area=gSum(areas);
+        scalarField logCa,logCc;
+        logConcentrationFactors(e,logCa,logCc);
+        eqFaces[e].setSize(p.size(),0); etaFaces[e].setSize(p.size(),0);
+        etaRefFaces[e].setSize(p.size(),0); validFaces[e].setSize(p.size(),0);
+        scalar eqIntegral=0,etaIntegral=0,etaRefIntegral=0;
+        bool valid=true;
+        const scalar aPlusC=(alphaA_[e]+alphaC_[e])*F_/(R_*T_);
+        forAll(p,f)
+        {
+            const scalar etaRef=phiS_[e]-p[f]-Eeq_[e];
+            etaRefFaces[e][f]=etaRef;
+            etaRefIntegral+=areas[f]*etaRef;
+            if (std::isfinite(logCa[f])&&std::isfinite(logCc[f]))
+            {
+                const scalar eq=Eeq_[e]+(logCc[f]-logCa[f])/aPlusC;
+                const scalar eta=phiS_[e]-p[f]-eq;
+                eqFaces[e][f]=eq; etaFaces[e][f]=eta; validFaces[e][f]=1;
+                eqIntegral+=areas[f]*eq; etaIntegral+=areas[f]*eta;
+                minEta[e]=min(minEta[e],eta);maxEta[e]=max(maxEta[e],eta);
+            }
+            else valid=false; // At extinction there is no finite local equilibrium.
+        }
+        reduce(valid,andOp<bool>());
+        reduce(eqIntegral,sumOp<scalar>());reduce(etaIntegral,sumOp<scalar>());
+        reduce(etaRefIntegral,sumOp<scalar>());
+        reduce(minEta[e],minOp<scalar>());reduce(maxEta[e],maxOp<scalar>());
+        equilibriumValid[e]=valid;
+        meanPhiE[e]=gSum(areas*scalarField(p))/area;
+        meanEtaRef[e]=etaRefIntegral/area;
+        meanEq[e]=valid ? eqIntegral/area : nan;
+        meanEta[e]=valid ? etaIntegral/area : nan;
+        if (!valid) {minEta[e]=nan;maxEta[e]=nan;}
+    }
+    const bool valid=equilibriumValid[anode]&&equilibriumValid[cathode];
+    const scalar cell=phiS_[anode]-phiS_[cathode];
+    const scalar electrolyte=meanPhiE[anode]-meanPhiE[cathode];
+    electroChemBV::VoltageBudget<scalar> budget{cell,nan,nan,electrolyte,nan,nan};
+    if (valid) budget=electroChemBV::voltageBudget
+    (
+        phiS_[anode],phiS_[cathode],meanEq[anode],meanEq[cathode],
+        meanEta[anode],meanEta[cathode],meanPhiE[anode],meanPhiE[cathode]
+    );
+    const scalar eqRef=Eeq_[anode]-Eeq_[cathode];
+    const scalar concentration=valid ? budget.equilibrium-eqRef : nan;
+    const scalar excessRef=cell-eqRef;
+    const auto printElectrodes=[&](const char* name,const scalarList& values)
+    {
+        Info<< "  " << name << ":";
+        forAll(electrodeNames_,e) Info<< " " << electrodeNames_[e] << "=" << values[e] << " V";
+        Info<< nl;
+    };
+    if (printPhiS) printElectrodes("phiS",phiS_);
+    if (printEq) printElectrodes("Eeq",meanEq);
+    if (printRef) printElectrodes("Eref",Eeq_);
+    if (printEta)
+        Info<< "  eta (activation): " << budget.activation << " V ("
+            << electrodeNames_[anode] << " mean=" << meanEta[anode] << " V, "
+            << electrodeNames_[cathode] << " mean=" << meanEta[cathode] << " V)" << nl;
+    if (printEtaRef) printElectrodes("etaRef mean",meanEtaRef);
+    if (printCell) Info<< "  cellVoltage: " << cell << " V" << nl;
+    if (printBudget)
+    {
+        Info<< "  voltageBudget [V]: Veq=" << budget.equilibrium
+            << ", Vactivation=" << budget.activation << ", Velectrolyte=" << electrolyte
+            << ", Vexcess=" << budget.excess << ", closure=" << budget.closure;
+        if (referenceState_) Info<< ", VeqRef=" << eqRef << ", Vconcentration=" << concentration
+            << ", VexcessRef=" << excessRef << ", equilibriumValid=" << valid;
+        Info<< nl;
+    }
+
+    // Fields contain zero placeholders off electrodes and, for Eeq/eta only,
+    // on faces lacking a finite equilibrium. Consult equilibriumValidity.
+    const auto writeSurface=[&](const word& name,const label kind)
+    {
+        surfaceScalarField field
+        (
+            IOobject(name,mesh_.time().timeName(),mesh_,IOobject::NO_READ,IOobject::NO_WRITE,false),
+            mesh_,dimensionedScalar("zero",kind>=6 ? dimless : phiE_.dimensions(),0.0)
+        );
+        forAll(electrodeNames_,e)
+        {
+            fvsPatchScalarField& patch=field.boundaryFieldRef()[patchIDs_[e]];
+            forAll(patch,f)
+            {
+                if (kind==1) patch[f]=phiS_[e];
+                else if (kind==2) patch[f]=eqFaces[e][f];
+                else if (kind==3) patch[f]=etaFaces[e][f];
+                else if (kind==4) patch[f]=Eeq_[e];
+                else if (kind==5) patch[f]=etaRefFaces[e][f];
+                else if (kind==6) patch[f]=1;
+                else patch[f]=validFaces[e][f];
+            }
+        }
+        field.write();
+    };
+    if (writeElectrodes)
+    {
+        if (writePhiS) writeSurface("phiS",1);
+        if (writeEq) writeSurface("Eeq",2);
+        if (writeEta) writeSurface("eta",3);
+        if (writeRef) writeSurface("Eref",4);
+        if (writeEtaRef) writeSurface("etaRef",5);
+        writeSurface("electrodePotentialMask",6);
+        if (referenceState_&&(writeEq||writeEta)) writeSurface("equilibriumValidity",7);
+    }
+    if (!Pstream::master()) return;
+    const fileName startName(Foam::name(mesh_.time().startTime().value()));
+    if (writeElectrodes)
+    {
+        if (!electrodePotentialLog_.valid())
+        {
+            const fileName dir(mesh_.time().globalPath()/"postProcessing"/"phiS"/startName);
+            mkDir(dir);electrodePotentialLog_.reset(new OFstream(dir/"electrodes.dat"));
+            electrodePotentialLog_().precision(12);
+            electrodePotentialLog_()<< "# Potentials [V], currents [A]; area means; oxidation-positive I" << nl
+                << "# time electrode phiS phiEmean Eeq etaMin etaMean etaMax Iapplied Itarget";
+            if (referenceState_) electrodePotentialLog_()<< " Eref etaRefMean equilibriumValid";
+            electrodePotentialLog_()<< nl;
+        }
+        forAll(electrodeNames_,e)
+        {
+            electrodePotentialLog_()<< mesh_.time().value()<< ' '<<electrodeNames_[e]<< ' '
+                <<phiS_[e]<< ' '<<meanPhiE[e]<< ' '<<meanEq[e]<< ' '
+                <<minEta[e]<< ' '<<meanEta[e]<< ' '<<maxEta[e]<< ' '
+                <<actualCurrent_[e]<< ' '<<targetCurrent_[e];
+            if (referenceState_) electrodePotentialLog_()<< ' '<<Eeq_[e]<< ' '
+                <<meanEtaRef[e]<< ' '<<equilibriumValid[e];
+            electrodePotentialLog_()<< nl;
+        }
+        electrodePotentialLog_().flush();
+    }
+    if (outputTime&&writeCell)
+    {
+        if (!cellVoltageLog_.valid())
+        {
+            const fileName dir(mesh_.time().globalPath()/"postProcessing"/"cellVoltage"/startName);
+            mkDir(dir);cellVoltageLog_.reset(new OFstream(dir/"cellVoltage.dat"));
+            cellVoltageLog_().precision(12);
+            cellVoltageLog_()<< "# Signed anode-minus-cathode budget [V]; area means" << nl
+                << "# time Vcell Veq Vactivation Velectrolyte Vexcess closure";
+            if (referenceState_) cellVoltageLog_()<< " VeqRef Vconcentration VexcessRef equilibriumValid";
+            cellVoltageLog_()<< nl;
+        }
+        cellVoltageLog_()<<mesh_.time().value()<< ' '<<cell<< ' '<<budget.equilibrium<< ' '
+            <<budget.activation<< ' '<<electrolyte<< ' '<<budget.excess<< ' '<<budget.closure;
+        if (referenceState_) cellVoltageLog_()<< ' '<<eqRef<< ' '<<concentration<< ' '<<excessRef<< ' '<<valid;
+        cellVoltageLog_()<< nl;cellVoltageLog_().flush();
     }
 }
 

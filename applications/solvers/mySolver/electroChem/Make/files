@@ -9,5 +9,6 @@ potentialModels/electroneutralGalvanostatic/electroneutralGalvanostatic.C
 currentModels/currentManager/currentManager.C
 currentModels/constantCurrent/constantCurrent.C
 currentModels/ButlerVolmer/ButlerVolmer.C
+currentModels/concentrationButlerVolmer/concentrationButlerVolmer.C
 
 EXE = $(FOAM_USER_APPBIN)/electroChem

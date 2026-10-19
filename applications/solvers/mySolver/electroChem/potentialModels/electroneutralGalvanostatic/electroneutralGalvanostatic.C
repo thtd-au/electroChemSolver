@@ -8,7 +8,6 @@
 #include "fvcLaplacian.H"
 #include "fvmLaplacian.H"
 #include "PstreamReduceOps.H"
-#include <limits>
 
 namespace Foam
 {
@@ -271,15 +270,9 @@ void electroneutralGalvanostatic::evaluateConstraint()
         chargeResidual_[celli] = E;
         chargeScale_[celli] = max(ionic, absTol_);
 
-        // E is a cancellation of ionic concentrations. Allow only floating-
-        // point roundoff on that concentration scale at the tolerance edge.
-        // This is not an additional physical electroneutrality tolerance.
-        const scalar roundoff =
-            scalar(2*(c_.size() + 1))
-           *std::numeric_limits<scalar>::epsilon()*chargeScale_[celli];
         const scalar allowed = max(absTol_, relTol_*chargeScale_[celli]);
 
-        if (!(mag(E) <= allowed + roundoff))
+        if (!(mag(E) <= allowed))
         {
             converged_ = false;
         }
@@ -416,28 +409,19 @@ void electroneutralGalvanostatic::report() const
 {
     scalar maxAbs = 0.0;
     scalar maxRel = 0.0;
-    scalar maxRoundoff = 0.0;
     forAll(chargeResidual_, celli)
     {
         maxAbs = max(maxAbs, mag(chargeResidual_[celli]));
         maxRel = max(maxRel,
             mag(chargeResidual_[celli])/chargeScale_[celli]);
-        maxRoundoff = max
-        (
-            maxRoundoff,
-            scalar(2*(c_.size() + 1))
-           *std::numeric_limits<scalar>::epsilon()*chargeScale_[celli]
-        );
+
     }
     reduce(maxAbs, maxOp<scalar>());
     reduce(maxRel, maxOp<scalar>());
-    reduce(maxRoundoff, maxOp<scalar>());
     Info<< "    Electroneutrality: converged="
         << (evaluated_ && converged_ ? "yes" : "no") << nl
         << "    max|E|=" << maxAbs << " mol/m3, max relative=" << maxRel
-        << ", absTol=" << absTol_ << ", relTol=" << relTol_ << nl
-        << "    max comparison roundoff allowance=" << maxRoundoff
-        << " mol/m3" << nl;
+        << ", absTol=" << absTol_ << ", relTol=" << relTol_ << nl;
 }
 
 } // End namespace Foam
