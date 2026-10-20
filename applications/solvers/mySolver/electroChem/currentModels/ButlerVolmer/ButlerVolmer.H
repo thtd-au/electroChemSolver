@@ -20,7 +20,8 @@ protected:
     word referencePatchName_;
     wordList electrodeNames_;
     labelList patchIDs_;
-    scalarList nuE_, i0_, alphaA_, alphaC_, Eeq_, phiS_;
+    // Prescribed Eeq (ordinary BV) or Eref (concentration-dependent BV).
+    scalarList nuE_, i0_, alphaA_, alphaC_, Ebase_, phiS_;
     scalarList targetCurrent_, area_, actualCurrent_;
     scalarList bvResidual_, boundaryResidual_;
     labelList rootIterations_;
@@ -30,7 +31,8 @@ protected:
     label rootMaxIter_;
     scalar currentRelaxation_;
     word relaxationMethod_;
-    scalar relaxationMin_, relaxationMax_, activeRelaxation_;
+    // Aitken starts at currentRelaxation_ and is bounded by [relaxationMin_, 1].
+    scalar relaxationMin_, activeRelaxation_;
     List<scalarField> previousResidual_;
     label relaxationTimeIndex_;
     bool haveResidual_;

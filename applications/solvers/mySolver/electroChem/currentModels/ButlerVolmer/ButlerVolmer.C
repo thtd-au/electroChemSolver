@@ -161,7 +161,7 @@ Real weightedCurrent(Real i0, Real a, Real c, Real etaRef, Real logCa, Real logC
 template<class Real>
 Real aitkenFactor
 (
-    Real omega, Real initial, Real lower, Real upper, bool history,
+    Real omega, Real initial, Real lower, bool history,
     Real numerator, Real denominator, Real oldNorm, Real newNorm
 )
 {
@@ -175,7 +175,7 @@ Real aitkenFactor
     {
         const Real proposed = -omega*numerator/denominator;
         return std::isfinite(proposed) && proposed > Real(0)
-            ? std::max(lower, std::min(upper, proposed))
+            ? std::max(lower, std::min(Real(1), proposed))
             : std::max(lower, Real(0.5)*omega);
     }
     return omega;
@@ -246,7 +246,7 @@ ButlerVolmer::ButlerVolmer
     i0_(electrodeNames_.size(), 0),
     alphaA_(electrodeNames_.size(), 0),
     alphaC_(electrodeNames_.size(), 0),
-    Eeq_(electrodeNames_.size(), 0),
+    Ebase_(electrodeNames_.size(), 0),
     phiS_(electrodeNames_.size(), 0),
     targetCurrent_(electrodeNames_.size(), 0),
     area_(electrodeNames_.size(), 0),
@@ -259,7 +259,7 @@ ButlerVolmer::ButlerVolmer
     absTol_(0), relTol_(0), rootAbsTol_(0), rootRelTol_(0),
     rootMaxIter_(100), currentRelaxation_(1),
     relaxationMethod_("fixed"),
-    relaxationMin_(0.005), relaxationMax_(0.1), activeRelaxation_(1),
+    relaxationMin_(0.005), activeRelaxation_(1),
     previousResidual_(electrodeNames_.size()),
     relaxationTimeIndex_(-1), haveResidual_(false),
     initialized_(false), evaluated_(false), converged_(false)
@@ -283,8 +283,13 @@ ButlerVolmer::ButlerVolmer
     currentRelaxation_ = controls.getOrDefault<scalar>("relaxation", 1.0);
     relaxationMethod_ = controls.getOrDefault<word>("relaxationMethod", "fixed");
     relaxationMin_ = controls.getOrDefault<scalar>("relaxationMin", 0.005);
-    relaxationMax_ = controls.getOrDefault<scalar>("relaxationMax", 0.1);
     activeRelaxation_ = currentRelaxation_;
+    if (controls.found("relaxationMax"))
+        FatalIOErrorInFunction(controls)
+            << "Remove obsolete current/relaxationMax. Aitken uses "
+            << "relaxation as its initial factor, relaxationMin as its "
+            << "lower bound, and a fixed upper bound of 1."
+            << exit(FatalIOError);
     if (relaxationMethod_ != "fixed" && relaxationMethod_ != "Aitken")
         FatalIOErrorInFunction(controls)
             << "current/relaxationMethod must be fixed or Aitken"
@@ -292,12 +297,11 @@ ButlerVolmer::ButlerVolmer
     if
     (
         relaxationMethod_ == "Aitken"
-     && (!finitePositive(relaxationMin_) || !finitePositive(relaxationMax_)
-      || relaxationMin_ > currentRelaxation_
-      || currentRelaxation_ > relaxationMax_ || relaxationMax_ > 1)
+     && (!finitePositive(relaxationMin_)
+      || relaxationMin_ > currentRelaxation_)
     )
         FatalIOErrorInFunction(controls)
-            << "Require 0 < relaxationMin <= relaxation <= relaxationMax <= 1"
+            << "Require 0 < relaxationMin <= relaxation <= 1"
             << exit(FatalIOError);
     if (!finitePositive(currentRelaxation_) || currentRelaxation_ > 1)
         FatalIOErrorInFunction(controls)
@@ -341,16 +345,26 @@ ButlerVolmer::ButlerVolmer
         i0_[e] = electrode.get<scalar>("i0");
         alphaA_[e] = electrode.get<scalar>("alpha_a");
         alphaC_[e] = electrode.get<scalar>("alpha_c");
-        // Eeq_ stores the prescribed Eref in reference-state kinetics.
-        Eeq_[e] = electrode.get<scalar>(referenceState_ ? "Eref" : "Eeq");
+        if (electrode.found(referenceState_ ? "Eeq" : "Eref"))
+            FatalIOErrorInFunction(electrode)
+                << "Use only " << (referenceState_ ? "Eref" : "Eeq")
+                << " for this current model; remove "
+                << (referenceState_ ? "Eeq" : "Eref") << exit(FatalIOError);
+        if (!referenceState_ && electrode.found("concentrationDependence"))
+            FatalIOErrorInFunction(electrode)
+                << "concentrationDependence requires concentrationButlerVolmer"
+                << exit(FatalIOError);
+        // Share the controller, but keep the two input conventions explicit.
+        Ebase_[e] = electrode.get<scalar>(referenceState_ ? "Eref" : "Eeq");
         if
         (
             !finitePositive(i0_[e]) || !finitePositive(alphaA_[e])
-         || !finitePositive(alphaC_[e]) || !std::isfinite(Eeq_[e])
+         || !finitePositive(alphaC_[e]) || !std::isfinite(Ebase_[e])
          || !std::isfinite(nuE_[e]) || mag(nuE_[e]) <= SMALL
         )
             FatalIOErrorInFunction(electrode)
-                << "Require finite positive i0/alpha_a/alpha_c, finite Eeq "
+                << "Require finite positive i0/alpha_a/alpha_c, finite "
+                << (referenceState_ ? "Eref" : "Eeq") << " "
                 << "and non-zero finite electronStoichCoeff" << exit(FatalIOError);
     }
     if ((nuE_[0] > 0) == (nuE_[1] > 0))
@@ -434,7 +448,7 @@ void ButlerVolmer::correct()
             << electrodeNames_[e] << exit(FatalError);
 
         // Center the root at the area-mean electrolyte potential plus Eeq.
-        const scalar phiRef = gSum(areas*scalarField(p))/area_[e] + Eeq_[e];
+        const scalar phiRef = gSum(areas*scalarField(p))/area_[e] + Ebase_[e];
         const scalar a = alphaA_[e]*F_/(R_*T_);
         const scalar c = alphaC_[e]*F_/(R_*T_);
         scalarField logCa, logCc;
@@ -447,7 +461,7 @@ void ButlerVolmer::correct()
             if (!finitePositive(areas[f]) || !std::isfinite(p[f]))
                 FatalErrorInFunction << "Invalid area/potential on "
                     << electrodeNames_[e] << " face " << f << exit(FatalError);
-            const scalar delta = phiRef-p[f]-Eeq_[e];
+            const scalar delta = phiRef-p[f]-Ebase_[e];
             const scalar logWeight = std::log(i0_[e]) + std::log(areas[f]);
             logTermsA[f] = logWeight+logCa[f]+a*delta;
             logTermsC[f] = logWeight+logCc[f]-c*delta;
@@ -488,7 +502,7 @@ void ButlerVolmer::correct()
             scalarField candidate(jn.size(), 0);
             forAll(jn, f)
                 candidate[f] = -electroChemBV::weightedCurrent
-                    (i0_[e], a, c, phiS_[e]-p[f]-Eeq_[e], logCa[f], logCc[f]);
+                    (i0_[e], a, c, phiS_[e]-p[f]-Ebase_[e], logCa[f], logCc[f]);
             // Remove only the root/roundoff integral error. The final BV
             // acceptance check still compares against the unmodified BV law.
             candidate += (-targetCurrent_[e]-gSum(candidate*areas))/area_[e];
@@ -526,7 +540,7 @@ void ButlerVolmer::correct()
     activeRelaxation_ = relaxationMethod_ == "Aitken"
         ? electroChemBV::aitkenFactor
           (
-              activeRelaxation_, currentRelaxation_, relaxationMin_, relaxationMax_,
+              activeRelaxation_, currentRelaxation_, relaxationMin_,
               historyValid, numerator, denominator, oldNorm, newNorm
           )
         : currentRelaxation_;
@@ -571,7 +585,7 @@ void ButlerVolmer::evaluateConstraint()
             forAll(jn, f)
             {
                 const scalar bv = electroChemBV::weightedCurrent
-                    (i0_[e],a,c,phiS_[e]-p[f]-Eeq_[e],logCa[f],logCc[f]);
+                    (i0_[e],a,c,phiS_[e]-p[f]-Ebase_[e],logCa[f],logCc[f]);
                 const scalar kappa = conductivity.boundaryField()[patchi][f];
                 if (!finitePositive(kappa) || !finitePositive(areas[f]))
                     FatalErrorInFunction << "Invalid conductivity/area on electrode "
@@ -683,12 +697,12 @@ void ButlerVolmer::writeDiagnostics()
         const scalar aPlusC=(alphaA_[e]+alphaC_[e])*F_/(R_*T_);
         forAll(p,f)
         {
-            const scalar etaRef=phiS_[e]-p[f]-Eeq_[e];
+            const scalar etaRef=phiS_[e]-p[f]-Ebase_[e];
             etaRefFaces[e][f]=etaRef;
             etaRefIntegral+=areas[f]*etaRef;
             if (std::isfinite(logCa[f])&&std::isfinite(logCc[f]))
             {
-                const scalar eq=Eeq_[e]+(logCc[f]-logCa[f])/aPlusC;
+                const scalar eq=Ebase_[e]+(logCc[f]-logCa[f])/aPlusC;
                 const scalar eta=phiS_[e]-p[f]-eq;
                 eqFaces[e][f]=eq; etaFaces[e][f]=eta; validFaces[e][f]=1;
                 eqIntegral+=areas[f]*eq; etaIntegral+=areas[f]*eta;
@@ -716,7 +730,7 @@ void ButlerVolmer::writeDiagnostics()
         phiS_[anode],phiS_[cathode],meanEq[anode],meanEq[cathode],
         meanEta[anode],meanEta[cathode],meanPhiE[anode],meanPhiE[cathode]
     );
-    const scalar eqRef=Eeq_[anode]-Eeq_[cathode];
+    const scalar eqRef=Ebase_[anode]-Ebase_[cathode];
     const scalar concentration=valid ? budget.equilibrium-eqRef : nan;
     const scalar excessRef=cell-eqRef;
     const auto printElectrodes=[&](const char* name,const scalarList& values)
@@ -727,7 +741,7 @@ void ButlerVolmer::writeDiagnostics()
     };
     if (printPhiS) printElectrodes("phiS",phiS_);
     if (printEq) printElectrodes("Eeq",meanEq);
-    if (printRef) printElectrodes("Eref",Eeq_);
+    if (printRef) printElectrodes("Eref",Ebase_);
     if (printEta)
         Info<< "  eta (activation): " << budget.activation << " V ("
             << electrodeNames_[anode] << " mean=" << meanEta[anode] << " V, "
@@ -761,7 +775,7 @@ void ButlerVolmer::writeDiagnostics()
                 if (kind==1) patch[f]=phiS_[e];
                 else if (kind==2) patch[f]=eqFaces[e][f];
                 else if (kind==3) patch[f]=etaFaces[e][f];
-                else if (kind==4) patch[f]=Eeq_[e];
+                else if (kind==4) patch[f]=Ebase_[e];
                 else if (kind==5) patch[f]=etaRefFaces[e][f];
                 else if (kind==6) patch[f]=1;
                 else patch[f]=validFaces[e][f];
@@ -799,7 +813,7 @@ void ButlerVolmer::writeDiagnostics()
                 <<phiS_[e]<< ' '<<meanPhiE[e]<< ' '<<meanEq[e]<< ' '
                 <<minEta[e]<< ' '<<meanEta[e]<< ' '<<maxEta[e]<< ' '
                 <<actualCurrent_[e]<< ' '<<targetCurrent_[e];
-            if (referenceState_) electrodePotentialLog_()<< ' '<<Eeq_[e]<< ' '
+            if (referenceState_) electrodePotentialLog_()<< ' '<<Ebase_[e]<< ' '
                 <<meanEtaRef[e]<< ' '<<equilibriumValid[e];
             electrodePotentialLog_()<< nl;
         }

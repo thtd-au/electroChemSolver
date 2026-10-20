@@ -7,7 +7,9 @@ namespace Foam
 {
 
 // Reference-state kinetics with arbitrary configured species on each electrode.
-// Controller, Aitken coupling and output infrastructure are shared with BV.
+// Only kinetics live here. The galvanostatic controller, current relaxation,
+// exact residual checks and diagnostics are inherited from ButlerVolmer.
+// This baseline has no transport-response prediction or Taylor correction.
 class concentrationButlerVolmer : public ButlerVolmer
 {
     List<wordList> dependencyNames_;
