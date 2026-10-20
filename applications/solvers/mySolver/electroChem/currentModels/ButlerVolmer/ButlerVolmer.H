@@ -52,6 +52,14 @@ protected:
         const label electrode, scalarField& logCa, scalarField& logCc
     ) const;
 
+    // Extension point for concentration-specific interface preconditioning.
+    // Return a metal-potential increment paired with the candidate change.
+    // Ordinary BV leaves both the candidate and history untouched.
+    virtual scalar adjustCurrentCandidate
+    (
+        const label, const scalarField&, scalarField&,
+        const scalarField&, const scalarField&, bool&
+    ) { return 0; }
 
 public:
     TypeName("ButlerVolmer");

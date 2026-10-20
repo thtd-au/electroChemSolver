@@ -432,6 +432,7 @@ void ButlerVolmer::correct()
     }
     List<scalarField> baseCurrent(electrodeNames_.size());
     List<scalarField> residual(electrodeNames_.size());
+    scalarList potentialIncrement(electrodeNames_.size(), 0);
     scalar numerator = 0, denominator = 0, oldNorm = 0, newNorm = 0;
     bool historyValid = haveResidual_;
 
@@ -509,6 +510,10 @@ void ButlerVolmer::correct()
             baseCurrent[e] = previousCurrent;
             baseCurrent[e] +=
                 (-targetCurrent_[e]-gSum(previousCurrent*areas))/area_[e];
+            potentialIncrement[e] = adjustCurrentCandidate
+            (
+                e, baseCurrent[e], candidate, logCa, logCc, historyValid
+            );
             residual[e] = candidate-baseCurrent[e];
             if (previousResidual_[e].size() != residual[e].size())
                 historyValid = false;
@@ -551,6 +556,7 @@ void ButlerVolmer::correct()
         fvsPatchScalarField& jn = electrodeCurrentDensity_.boundaryFieldRef()[patchi];
         // The first initialization has no previous physical current to mix.
         const scalar omega = initialized_ ? activeRelaxation_ : scalar(1);
+        phiS_[e] += omega*potentialIncrement[e];
         forAll(jn, f) jn[f] = baseCurrent[e][f]+omega*residual[e][f];
         const scalar offset = (-targetCurrent_[e]-gSum(scalarField(jn)*areas))/area_[e];
         forAll(jn, f) jn[f] += offset;
