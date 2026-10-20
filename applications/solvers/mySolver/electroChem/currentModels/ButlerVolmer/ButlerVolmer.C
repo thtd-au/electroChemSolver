@@ -254,6 +254,9 @@ ButlerVolmer::ButlerVolmer
     bvResidual_(electrodeNames_.size(), 0),
     boundaryResidual_(electrodeNames_.size(), 0),
     rootIterations_(electrodeNames_.size(), 0),
+    currentChange_(electrodeNames_.size(), 0),
+    appliedCurrentChange_(electrodeNames_.size(), 0),
+    metalPotentialChange_(electrodeNames_.size(), 0),
     T_(0), F_(0), R_(8.31446261815324),
     referenceState_(referenceState),
     absTol_(0), relTol_(0), rootAbsTol_(0), rootRelTol_(0),
@@ -405,6 +408,7 @@ scalar ButlerVolmer::currentTolerance(const scalar value) const
 
 void ButlerVolmer::correct()
 {
+    const scalarList previousPhiS(phiS_);
     const label refi = mesh_.boundaryMesh().findPatchID(referencePatchName_);
     if (refi < 0) FatalErrorInFunction << "Missing reference electrode patch"
         << exit(FatalError);
@@ -431,6 +435,7 @@ void ButlerVolmer::correct()
         haveResidual_ = false;
     }
     List<scalarField> baseCurrent(electrodeNames_.size());
+    List<scalarField> candidates(electrodeNames_.size());
     List<scalarField> residual(electrodeNames_.size());
     scalarList potentialIncrement(electrodeNames_.size(), 0);
     scalar numerator = 0, denominator = 0, oldNorm = 0, newNorm = 0;
@@ -500,7 +505,8 @@ void ButlerVolmer::correct()
             rootIterations_[e] = root.iterations;
             fvsPatchScalarField& jn = electrodeCurrentDensity_.boundaryFieldRef()[patchi];
             const scalarField previousCurrent(jn);
-            scalarField candidate(jn.size(), 0);
+            candidates[e].setSize(jn.size(), 0);
+            scalarField& candidate=candidates[e];
             forAll(jn, f)
                 candidate[f] = -electroChemBV::weightedCurrent
                     (i0_[e], a, c, phiS_[e]-p[f]-Ebase_[e], logCa[f], logCc[f]);
@@ -514,27 +520,31 @@ void ButlerVolmer::correct()
             (
                 e, baseCurrent[e], candidate, logCa, logCc, historyValid
             );
-            residual[e] = candidate-baseCurrent[e];
-            if (previousResidual_[e].size() != residual[e].size())
-                historyValid = false;
-            if (historyValid)
-            {
-                forAll(jn, f)
-                {
-                    const scalar old = previousResidual_[e][f];
-                    const scalar delta = residual[e][f]-old;
-                    numerator += areas[f]*old*delta;
-                    denominator += areas[f]*sqr(delta);
-                    oldNorm += areas[f]*sqr(old);
-                    newNorm += areas[f]*sqr(residual[e][f]);
-                }
-            }
-
         }
         catch (const std::exception& error)
         {
             FatalErrorInFunction << "BV electrode " << electrodeNames_[e]
                 << ": " << error.what() << exit(FatalError);
+        }
+    }
+    adjustCurrentCandidates(baseCurrent,candidates,potentialIncrement,historyValid);
+    forAll(electrodeNames_,e)
+    {
+        const label patchi=patchIDs_[e];
+        const scalarField& areas=mesh_.magSf().boundaryField()[patchi];
+        residual[e]=candidates[e]-baseCurrent[e];
+        if (previousResidual_[e].size()!=residual[e].size()) historyValid=false;
+        if (historyValid)
+        {
+            forAll(residual[e],f)
+            {
+                const scalar old=previousResidual_[e][f];
+                const scalar delta=residual[e][f]-old;
+                numerator+=areas[f]*old*delta;
+                denominator+=areas[f]*sqr(delta);
+                oldNorm+=areas[f]*sqr(old);
+                newNorm+=areas[f]*sqr(residual[e][f]);
+            }
         }
     }
     reduce(historyValid, andOp<bool>());
@@ -560,6 +570,16 @@ void ButlerVolmer::correct()
         forAll(jn, f) jn[f] = baseCurrent[e][f]+omega*residual[e][f];
         const scalar offset = (-targetCurrent_[e]-gSum(scalarField(jn)*areas))/area_[e];
         forAll(jn, f) jn[f] += offset;
+        currentChange_[e]=0;
+        appliedCurrentChange_[e]=0;
+        forAll(jn,f)
+        {
+            currentChange_[e]=max(currentChange_[e],mag(residual[e][f]));
+            appliedCurrentChange_[e]=max(appliedCurrentChange_[e],mag(jn[f]-baseCurrent[e][f]));
+        }
+        reduce(currentChange_[e],maxOp<scalar>());
+        reduce(appliedCurrentChange_[e],maxOp<scalar>());
+        metalPotentialChange_[e]=mag(phiS_[e]-previousPhiS[e]);
         previousResidual_[e] = residual[e];
     }
     haveResidual_ = initialized_;
@@ -637,24 +657,32 @@ bool ButlerVolmer::converged() const
 
 void ButlerVolmer::report() const
 {
-    Info<< "    " << type() << ": converged=" << (evaluated_ && converged_ ? "yes" : "no") << nl;
-    bool commonRootIterations = true;
-    forAll(rootIterations_, e)
-        if (rootIterations_[e] != rootIterations_[0]) commonRootIterations = false;
-    forAll(electrodeNames_, e)
+    Info<< "    " << type() << ": converged=" << (evaluated_ && converged_ ? "yes" : "no")
+        << ", absTol=" << absTol_ << " A/m2, relTol=" << relTol_ << nl;
+    if (!evaluated_)
     {
-        Info<< "    " << electrodeNames_[e] << ": phiS=" << phiS_[e]
-            << " V, max BV residual=" << bvResidual_[e]
-            << " A/m2, max ionic boundary residual=" << boundaryResidual_[e]
-            << " A/m2";
-        if (!commonRootIterations) Info<< ", root iterations=" << rootIterations_[e];
-        Info<< nl;
+        Info<< "    Current state has not been evaluated" << nl;
+        return;
     }
-    Info<< "    relaxation=" << activeRelaxation_ << " (" << relaxationMethod_ << ")";
-    if (commonRootIterations) Info<< ", root iterations=" << rootIterations_[0];
-    Info<< nl;
+    forAll(electrodeNames_,e)
+    {
+        Info<< "    " << electrodeNames_[e] << ": max|BV residual|=" << bvResidual_[e]
+            << " A/m2, max|ionic boundary residual|=" << boundaryResidual_[e]
+            << " A/m2, |I-Itarget|=" << mag(actualCurrent_[e]-targetCurrent_[e]) << " A" << nl;
+    }
+    if (converged_) return;
+    // The BV update precedes transport; these corrections produced the state
+    // just tested. They are not a forecast of the next Picard correction.
+    Info<< "    Applied BV update: relaxation=" << activeRelaxation_
+        << " (" << relaxationMethod_ << ")" << nl;
+    forAll(electrodeNames_,e)
+    {
+        Info<< "    " << electrodeNames_[e] << ": max|deltaJn|=" << currentChange_[e]
+            << " A/m2, applied max|deltaJn|=" << appliedCurrentChange_[e]
+            << " A/m2, |deltaPhiS|=" << metalPotentialChange_[e]
+            << " V, root iterations=" << rootIterations_[e] << nl;
+    }
 }
-
 
 void ButlerVolmer::writeDiagnostics()
 {

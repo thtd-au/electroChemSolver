@@ -6,6 +6,8 @@
 #include "OStringStream.H"
 #include "IStringStream.H"
 #include "token.H"
+#include "mixedFvPatchFields.H"
+#include "fvmLaplacian.H"
 #include "PstreamReduceOps.H"
 #include <cmath>
 #include <limits>
@@ -53,42 +55,32 @@ Real boundaryCurrentResponse
 }
 
 
-struct DiagnosticBV
-{
-    long double ia, ic, current, slope;
-};
-
-template<class Real>
-bool diagnosticBV
-(
-    Real i0, Real a, Real c, Real eta, Real logCa, Real logCc, DiagnosticBV& result
-)
-{
-    const Real negInf=-std::numeric_limits<Real>::infinity();
-    if (!std::isfinite(eta) || !std::isfinite(i0) || i0<=0
-     || (!std::isfinite(logCa) && logCa!=negInf)
-     || (!std::isfinite(logCc) && logCc!=negInf)) return false;
-    const long double lp=std::log(static_cast<long double>(i0))+logCa
-        +static_cast<long double>(a)*eta;
-    const long double lc=std::log(static_cast<long double>(i0))+logCc
-        -static_cast<long double>(c)*eta;
-    const long double limit=std::log(std::numeric_limits<long double>::max())-8;
-    if (lp>limit || lc>limit) return false;
-    result.ia=std::exp(lp);
-    result.ic=std::exp(lc);
-    // expm1 retains accuracy in counterfactual states near branch cancellation.
-    if (lp== -std::numeric_limits<long double>::infinity()
-     && lc== -std::numeric_limits<long double>::infinity()) result.current=0;
-    else if (lp>=lc) result.current=result.ia*(-std::expm1(lc-lp));
-    else result.current=result.ic*std::expm1(lp-lc);
-    result.slope=static_cast<long double>(a)*result.ia
-        +static_cast<long double>(c)*result.ic;
-    return std::isfinite(result.current) && std::isfinite(result.slope);
-}
-
-bool scalarDiagnostic(const long double value)
+// Validate extended-precision intermediate values before scalar conversion.
+bool scalarRepresentable(const long double value)
 {
     return std::isfinite(value) && std::abs(value)<=std::numeric_limits<scalar>::max();
+}
+
+// Mixed coefficients for k*L*snGrad(psi)+g*psi=-h (zero metal increment).
+template<class Real>
+bool potentialRobinCoefficients
+(
+    Real k, Real L, Real delta, Real g, Real h, Real minimumFraction,
+    Real& fraction, Real& value
+)
+{
+    if (!std::isfinite(k) || !std::isfinite(L) || !std::isfinite(delta)
+     || !std::isfinite(g) || !std::isfinite(h) || k<=0 || L<=0 || delta<=0 || g<=0)
+        return false;
+    const long double denom=static_cast<long double>(k)*L*delta+g;
+    const long double w=static_cast<long double>(g)/denom;
+    const long double v=-static_cast<long double>(h)/g;
+    if (!std::isfinite(w) || !std::isfinite(v)
+     || w<=minimumFraction || w>1 || std::abs(v)>std::numeric_limits<Real>::max())
+        return false;
+    fraction=static_cast<Real>(w);
+    value=static_cast<Real>(v);
+    return true;
 }
 
 } // namespace electroChemConcentration
@@ -112,37 +104,18 @@ concentrationButlerVolmer::concentrationButlerVolmer
     chargeNumber_(electrodeNames_.size()),
     responseMethod_(mesh.solutionDict().subDict("Picard").subDict("current")
         .getOrDefault<word>("responseMethod", "boundaryTaylor")),
-    responseDiagnostics_(mesh.solutionDict().subDict("Picard").subDict("current")
-        .getOrDefault<Switch>("responseDiagnostics", false)),
     responseStatus_(electrodeNames_.size(), 0),
-    denominatorMin_(electrodeNames_.size(), 1),
-    denominatorMax_(electrodeNames_.size(), 1),
     responseStepScale_(electrodeNames_.size(), 1),
-    potentialIncrement_(electrodeNames_.size(), 0),
-    predictedFaces_(electrodeNames_.size()),
-    predictionAbsError_(electrodeNames_.size(), 0),
-    predictionRelError_(electrodeNames_.size(), 0),
-    havePrediction_(false), predictionTested_(false),
-    linearizationPhiS_(electrodeNames_.size(),0),
-    beforeFaces_(electrodeNames_.size()),
-    predictionPhiE_(electrodeNames_.size()),
-    previousPhiE_(electrodeNames_.size()), previousCurrent_(electrodeNames_.size()),
-    previousLogCa_(electrodeNames_.size()), previousLogCc_(electrodeNames_.size()),
-    previousPhiS_(electrodeNames_.size(),0), havePreviousState_(false),
-    diagnosticTimeIndex_(-1),
-    predictedBVResidual_(electrodeNames_.size(),0),
-    kineticPredictionError_(electrodeNames_.size(),0), tangentRemainder_(electrodeNames_.size(),0),
-    potentialSensitivity_(electrodeNames_.size(),0), potentialTolerance_(electrodeNames_.size(),0),
-    sweepPotentialEffect_(electrodeNames_.size(),0),
-    electrolyteEffect_(electrodeNames_.size(),0), netEtaEffect_(electrodeNames_.size(),0),
-    compositionEffect_(electrodeNames_.size(),0), currentStep_(electrodeNames_.size(),0),
-    decompositionError_(electrodeNames_.size(),0),
-    predictionCurrentValid_(electrodeNames_.size(),false),
-    tangentValid_(electrodeNames_.size(),false), couplingValid_(electrodeNames_.size(),false)
+    potentialDiagonal_(electrodeNames_.size()), potentialSlope_(electrodeNames_.size()),
+    potentialRhs_(electrodeNames_.size()), potentialAnchor_(electrodeNames_.size()),
+    potentialDcDj_(electrodeNames_.size()), potentialResponseStatus_(0),
+    potentialSolveIterations_(0), potentialCurrentDefect_(0), potentialRowResidual_(0), potentialStepScale_(1),
+    predictedPotentialMax_(electrodeNames_.size(),0)
 {
-    if (responseMethod_ != "none" && responseMethod_ != "boundaryTaylor")
+    if (responseMethod_ != "none" && responseMethod_ != "boundaryTaylor"
+     && responseMethod_ != "boundaryPotential")
         FatalIOErrorInFunction(currentDict_)
-            << "current/responseMethod must be none or boundaryTaylor"
+            << "current/responseMethod must be none, boundaryTaylor or boundaryPotential"
             << exit(FatalIOError);
     const IOdictionary& reactions=mesh.lookupObject<IOdictionary>("reactions");
     const wordList species(reactions.lookup("species"));
@@ -260,11 +233,7 @@ scalar concentrationButlerVolmer::adjustCurrentCandidate
     const scalarField& logCa, const scalarField& logCc, bool& historyValid
 )
 {
-    if (responseDiagnostics_) linearizationPhiS_[e]=phiS_[e];
-    denominatorMin_[e]=1;
-    denominatorMax_[e]=1;
     responseStepScale_[e]=1;
-    potentialIncrement_[e]=0;
     const auto setStatus=[&](const label status)
     {
         if (responseStatus_[e]!=status) historyValid=false;
@@ -379,18 +348,13 @@ scalar concentrationButlerVolmer::adjustCurrentCandidate
     }
 
     scalar numerator=0, denominator=0;
-    scalar dmin=GREAT,dmax=-GREAT;
     forAll(candidate,f)
     {
         numerator+=areas[f]*(candidate[f]-baseCurrent[f]-compositionOffset[f])/diagonal[f];
         denominator+=areas[f]*gEta[f]/diagonal[f];
-        dmin=min(dmin,diagonal[f]);
-        dmax=max(dmax,diagonal[f]);
     }
     reduce(numerator,sumOp<scalar>());
     reduce(denominator,sumOp<scalar>());
-    reduce(dmin,minOp<scalar>());
-    reduce(dmax,maxOp<scalar>());
     if (!std::isfinite(numerator) || !std::isfinite(denominator) || denominator<=VSMALL)
     {
         setStatus(2);
@@ -428,301 +392,259 @@ scalar concentrationButlerVolmer::adjustCurrentCandidate
         setStatus(2);
         return 0;
     }
+    if (responseMethod_=="boundaryPotential")
+    {
+        potentialDiagonal_[e]=diagonal;
+        potentialSlope_[e]=gEta;
+        potentialRhs_[e]=candidate-baseCurrent-compositionOffset;
+        potentialAnchor_[e]=anchorConcentration;
+        potentialDcDj_[e]=dcDj;
+    }
     forAll(candidate,f) candidate[f]=baseCurrent[f]+scale*step[f];
-    denominatorMin_[e]=dmin;
-    denominatorMax_[e]=dmax;
     responseStepScale_[e]=scale;
-    potentialIncrement_[e]=scale*dPhi;
     setStatus(1);
     if (scale<1) historyValid=false;
-    return potentialIncrement_[e];
+    return scale*dPhi;
 }
 
 
-void concentrationButlerVolmer::correct()
+void concentrationButlerVolmer::adjustCurrentCandidates
+(
+    const List<scalarField>& baseCurrent, List<scalarField>& candidates,
+    scalarList& increments, bool& historyValid
+)
 {
-    if (responseDiagnostics_ && diagnosticTimeIndex_!=mesh_.time().timeIndex())
+    const label oldStatus=potentialResponseStatus_;
+    potentialResponseStatus_=0;
+    potentialSolveIterations_=0;
+    potentialCurrentDefect_=0;
+    potentialRowResidual_=0;
+    potentialStepScale_=1;
+    predictedPotentialMax_=scalar(0);
+    const auto finish=[&]()
     {
-        havePreviousState_=false;
-        diagnosticTimeIndex_=mesh_.time().timeIndex();
-    }
-    ButlerVolmer::correct();
-    predictionTested_=false;
-    havePrediction_=responseMethod_=="boundaryTaylor";
-    if (!havePrediction_) return;
-    // Predict the NEXT face values at frozen current cell concentrations and
-    // stored potential gradient, using the ACTUALLY relaxed new face current.
-    // No BC evaluation and no physical field mutation occurs here.
-    forAll(electrodeNames_,e)
-    {
-        const label patchi=patchIDs_[e];
-        const fixedGradientFvPatchScalarField& phiBC=
-            refCast<const fixedGradientFvPatchScalarField>(phiE_.boundaryField()[patchi]);
-        const scalarField& delta=mesh_.boundary()[patchi].deltaCoeffs();
-        const fvsPatchScalarField& jn=electrodeCurrentDensity_.boundaryField()[patchi];
-        if (responseDiagnostics_) predictionPhiE_[e]=scalarField(phiE_.boundaryField()[patchi]);
-        predictedFaces_[e].setSize(dependencyNames_[e].size());
-        if (responseDiagnostics_) beforeFaces_[e].setSize(dependencyNames_[e].size());
-        forAll(dependencyNames_[e],m)
-        {
-            const volScalarField& field=mesh_.lookupObject<volScalarField>("c_"+dependencyNames_[e][m]);
-            const fvPatchScalarField& patch=field.boundaryField()[patchi];
-            const scalarField cells(patch.patchInternalField());
-            predictedFaces_[e][m]=scalarField(patch);
-            if (responseDiagnostics_) beforeFaces_[e][m]=scalarField(patch);
-            if (patch.type()=="zeroGradient") predictedFaces_[e][m]=cells;
-            if (patch.type()!="galvanostaticMolarFlux") continue;
-            forAll(jn,f)
-            {
-                const scalar beta=chargeNumber_[e][m]*F_/(R_*T_)*phiBC.gradient()[f];
-                const scalar denom=delta[f]+beta;
-                // The physical BC owns singularity errors. Do not create an
-                // invalid diagnostic division before the ordinary transport.
-                if (!std::isfinite(denom) || mag(denom)<=SMALL*max(mag(delta[f]),scalar(1)))
-                {
-                    havePrediction_=false;
-                    continue;
-                }
-                predictedFaces_[e][m][f]=delta[f]*cells[f]/denom
-                    +electroChemConcentration::boundaryCurrentResponse
-                    (speciesNu_[e][m],nuE_[e],F_,diffusivity_[e][m],delta[f],beta)*jn[f];
-                if (!std::isfinite(predictedFaces_[e][m][f])) havePrediction_=false;
-            }
-        }
-    }
-    reduce(havePrediction_,andOp<bool>());
-}
-
-void concentrationButlerVolmer::evaluateConstraint()
-{
-    ButlerVolmer::evaluateConstraint();
-    if (!havePrediction_)
-    {
-        if (responseDiagnostics_) evaluateResponseDiagnostics();
-        return;
-    }
-    forAll(electrodeNames_,e)
-    {
-        predictionAbsError_[e]=0;
-        predictionRelError_[e]=0;
-        forAll(dependencyNames_[e],m)
-        {
-            if (anodicOrders_[e][m]==0 && cathodicOrders_[e][m]==0) continue;
-            const volScalarField& field=mesh_.lookupObject<volScalarField>("c_"+dependencyNames_[e][m]);
-            const fvPatchScalarField& actual=field.boundaryField()[patchIDs_[e]];
-            forAll(actual,f)
-            {
-                const scalar predicted=predictedFaces_[e][m][f];
-                const scalar error=mag(actual[f]-predicted);
-                const scalar scale=max(referenceConcentrations_[e][m],max(mag(actual[f]),mag(predicted)));
-                predictionAbsError_[e]=max(predictionAbsError_[e],error);
-                predictionRelError_[e]=max(predictionRelError_[e],error/scale);
-            }
-        }
-        reduce(predictionAbsError_[e],maxOp<scalar>());
-        reduce(predictionRelError_[e],maxOp<scalar>());
-    }
-    predictionTested_=true;
-    if (responseDiagnostics_) evaluateResponseDiagnostics();
-}
-
-void concentrationButlerVolmer::evaluateResponseDiagnostics()
-{
-    using electroChemConcentration::DiagnosticBV;
-    using electroChemConcentration::diagnosticBV;
-    using electroChemConcentration::scalarDiagnostic;
-    const auto maxMagnitude=[](const long double value, scalar& maximum, bool& valid)
-    {
-        if (!scalarDiagnostic(value)) valid=false;
-        else maximum=max(maximum,scalar(std::abs(value)));
+        if (oldStatus!=potentialResponseStatus_) historyValid=false;
     };
+    if (responseMethod_!="boundaryPotential" || !initialized_)
+    { finish(); return; }
+    // Local boundaryTaylor candidates are already available for safe fallback.
+    potentialResponseStatus_=2;
+    if (Pstream::parRun() || electrodeNames_.size()!=2
+     || !mesh_.foundObject<surfaceScalarField>("kappaFace"))
+    { finish(); return; }
+    forAll(electrodeNames_,e)
+        if (responseStatus_[e]!=1) { finish(); return; }
+
+    // This two-solve Schur construction uses the all-flux boundary topology
+    // of the supplied case. A fixed-potential reservoir needs a larger Schur
+    // system; retain boundaryTaylor rather than impose an incorrect closure.
+    forAll(phiE_.boundaryField(),patchi)
+    {
+        const fvPatchScalarField& p=phiE_.boundaryField()[patchi];
+        if (!isA<fixedGradientFvPatchScalarField>(p) && p.type()!="zeroGradient")
+        { finish(); return; }
+    }
+    const surfaceScalarField& conductivity=
+        mesh_.lookupObject<surfaceScalarField>("kappaFace");
+    bool valid=true;
+    forAll(conductivity.primitiveField(),f)
+        if (!std::isfinite(conductivity.primitiveField()[f])
+         || conductivity.primitiveField()[f]<=0) valid=false;
+    forAll(conductivity.boundaryField(),p)
+        forAll(conductivity.boundaryField()[p],f)
+            if (!std::isfinite(conductivity.boundaryField()[p][f])
+             || conductivity.boundaryField()[p][f]<=0) valid=false;
+    if (!valid) { finish(); return; }
+
+    const IOdictionary& ec=mesh_.lookupObject<IOdictionary>("electroChemistry");
+    const word reference=ec.subDict("potential").get<word>("referencePatch");
+    const label refPatch=mesh_.boundaryMesh().findPatchID(reference);
+    if (refPatch<0 || mesh_.boundary()[refPatch].faceCells().empty())
+    { finish(); return; }
+    const label refCell=mesh_.boundary()[refPatch].faceCells()[0];
+    wordList types(mesh_.boundary().size(),"fixedGradient");
+    forAll(patchIDs_,e) types[patchIDs_[e]]="mixed";
+    volScalarField response0
+    (
+        IOobject("bvPotentialResponse0",mesh_.time().timeName(),mesh_,
+            IOobject::NO_READ,IOobject::NO_WRITE,false),
+        mesh_,dimensionedScalar("zero",phiE_.dimensions(),0),types
+    );
+    volScalarField response1
+    (
+        IOobject("bvPotentialResponse1",mesh_.time().timeName(),mesh_,
+            IOobject::NO_READ,IOobject::NO_WRITE,false),
+        mesh_,dimensionedScalar("zero",phiE_.dimensions(),0),types
+    );
+    forAll(types,patchi)
+    {
+        if (types[patchi]=="fixedGradient")
+        {
+            refCast<fixedGradientFvPatchScalarField>(response0.boundaryFieldRef()[patchi]).gradient()=0;
+            refCast<fixedGradientFvPatchScalarField>(response1.boundaryFieldRef()[patchi]).gradient()=0;
+        }
+    }
     forAll(electrodeNames_,e)
     {
         const label patchi=patchIDs_[e];
-        const fvPatchScalarField& phi=phiE_.boundaryField()[patchi];
-        const fvsPatchScalarField& jn=electrodeCurrentDensity_.boundaryField()[patchi];
-        const scalar a=alphaA_[e]*F_/(R_*T_), c=alphaC_[e]*F_/(R_*T_);
-        scalarField actualA,actualC;
-        logConcentrationFactors(e,actualA,actualC);
-        scalarField predictedA(phi.size(),0),predictedC(phi.size(),0);
-        scalarField beforeA(phi.size(),0),beforeC(phi.size(),0);
-        bool predictionOK=havePrediction_ && predictionPhiE_[e].size()==phi.size();
-        bool tangentOK=predictionOK && responseStatus_[e]==1;
-        bool couplingOK=havePreviousState_ && previousPhiE_[e].size()==phi.size()
-            && previousCurrent_[e].size()==phi.size()
-            && previousLogCa_[e].size()==phi.size() && previousLogCc_[e].size()==phi.size();
+        const scalarField& delta=mesh_.boundary()[patchi].deltaCoeffs();
+        mixedFvPatchScalarField& p0=
+            refCast<mixedFvPatchScalarField>(response0.boundaryFieldRef()[patchi]);
+        mixedFvPatchScalarField& p1=
+            refCast<mixedFvPatchScalarField>(response1.boundaryFieldRef()[patchi]);
+        p0.refGrad()=0; p1.refGrad()=0;
+        forAll(delta,f)
+        {
+            const scalar g=potentialSlope_[e][f],L=potentialDiagonal_[e][f];
+            const scalar k=conductivity.boundaryField()[patchi][f];
+            scalar fraction=0,value=0;
+            if (!electroChemConcentration::potentialRobinCoefficients
+                (k,L,delta[f],g,potentialRhs_[e][f],scalar(SMALL),fraction,value))
+            { valid=false; continue; }
+            p0.valueFraction()[f]=fraction;
+            p1.valueFraction()[f]=fraction;
+            p0.refValue()[f]=value;
+            // Basis for a +1 V increment of electrode 1's metal potential.
+            p1.refValue()[f]=e==1 ? scalar(1) : scalar(0);
+        }
+    }
+    if (!valid) { finish(); return; }
+    response0.correctBoundaryConditions();
+    response1.correctBoundaryConditions();
+    fvScalarMatrix eqn0(fvm::laplacian(conductivity,response0));
+    dictionary controls(eqn0.solverDict(phiE_.name()));
+    controls.set("log",label(0));
+    controls.set("relTol",scalar(0));
+    controls.set("tolerance",min(controls.get<scalar>("tolerance"),scalar(1e-12)));
+    controls.set("minIter",label(1));
+    const auto perf0=eqn0.solve(controls);
+    potentialSolveIterations_+=perf0.nIterations();
+    if (!perf0.converged()) { finish(); return; }
+    response0.correctBoundaryConditions();
+    fvScalarMatrix eqn1(fvm::laplacian(conductivity,response1));
+    const auto perf1=eqn1.solve(controls);
+    potentialSolveIterations_+=perf1.nIterations();
+    if (!perf1.converged()) { finish(); return; }
+    response1.correctBoundaryConditions();
+
+    const label constrainedPatch=patchIDs_[1];
+    const scalarField& constraintAreas=mesh_.magSf().boundaryField()[constrainedPatch];
+    const scalarField& constraintK=conductivity.boundaryField()[constrainedPatch];
+    const scalarField grad0(response0.boundaryField()[constrainedPatch].snGrad());
+    const scalarField grad1(response1.boundaryField()[constrainedPatch].snGrad());
+    const scalar I0=-gSum(constraintAreas*constraintK*grad0);
+    const scalar I1=-gSum(constraintAreas*constraintK*grad1);
+    if (!std::isfinite(I0) || !std::isfinite(I1) || mag(I1)<=VSMALL)
+    { finish(); return; }
+    const long double ratio=-static_cast<long double>(I0)/I1;
+    if (!electroChemConcentration::scalarRepresentable(ratio)) { finish(); return; }
+    const scalar metal1=scalar(ratio);
+    const scalar gauge=response0[refCell]+metal1*response1[refCell];
+    if (!std::isfinite(gauge)) { finish(); return; }
+    scalarList metal(electrodeNames_.size(),-gauge);
+    metal[1]+=metal1;
+    List<scalarField> step(electrodeNames_.size());
+    scalar scale=1;
+    forAll(electrodeNames_,e)
+    {
+        const label patchi=patchIDs_[e];
+        const scalarField& areas=mesh_.magSf().boundaryField()[patchi];
+        const scalarField& k=conductivity.boundaryField()[patchi];
+        const scalarField G0(response0.boundaryField()[patchi].snGrad());
+        const scalarField G1(response1.boundaryField()[patchi].snGrad());
+        const fvPatchScalarField& p0=response0.boundaryField()[patchi];
+        const fvPatchScalarField& p1=response1.boundaryField()[patchi];
+        step[e].setSize(areas.size(),0);
+        const scalar exponent=max(alphaA_[e],alphaC_[e])*F_/(R_*T_);
+        if (!std::isfinite(metal[e])) valid=false;
+        else if (exponent*mag(metal[e])>0.5)
+            scale=min(scale,scalar(0.5)/(exponent*mag(metal[e])));
+        forAll(areas,f)
+        {
+            const long double dj=-static_cast<long double>(k[f])*(G0[f]
+                +static_cast<long double>(metal1)*G1[f]);
+            const long double psi=p0[f]+static_cast<long double>(metal1)*p1[f]-gauge;
+            if (!electroChemConcentration::scalarRepresentable(dj)
+             || !electroChemConcentration::scalarRepresentable(psi))
+            { valid=false; continue; }
+            step[e][f]=scalar(dj);
+            const long double row=static_cast<long double>(potentialDiagonal_[e][f])*dj
+                +static_cast<long double>(potentialSlope_[e][f])*(metal[e]-psi)
+                -potentialRhs_[e][f];
+            if (!electroChemConcentration::scalarRepresentable(row)) valid=false;
+            else
+            {
+                potentialRowResidual_=max(potentialRowResidual_,scalar(std::abs(row)));
+                if (std::abs(row)>scalar(0.01)*currentTolerance(baseCurrent[e][f])) valid=false;
+            }
+            predictedPotentialMax_[e]=max(predictedPotentialMax_[e],scalar(std::abs(psi)));
+            const long double etaChange=metal[e]-psi;
+            if (exponent*std::abs(etaChange)>0.5)
+                scale=min(scale,scalar(0.5L/(exponent*std::abs(etaChange))));
+        }
+        const scalar defect=gSum(areas*step[e]);
+        potentialCurrentDefect_=max(potentialCurrentDefect_,mag(defect));
+        const scalar currentScale=max(appliedCurrentDensity_*area_[e],gSum(areas*mag(step[e])));
+        const scalar allowed=max(rootAbsTol_*area_[e],rootRelTol_*currentScale);
+        if (!std::isfinite(defect) || mag(defect)>allowed) valid=false;
+        // Roundoff projection only; a larger conservation defect triggers fallback.
+        if (std::isfinite(defect)) step[e]-=defect/area_[e];
         forAll(dependencyNames_[e],m)
         {
             if (anodicOrders_[e][m]==0 && cathodicOrders_[e][m]==0) continue;
-            forAll(phi,f)
+            forAll(step[e],f)
             {
-                if (predictionOK)
-                {
-                    try
-                    {
-                        predictedA[f]+=electroChemConcentration::logFactor
-                            (predictedFaces_[e][m][f],referenceConcentrations_[e][m],anodicOrders_[e][m]);
-                        predictedC[f]+=electroChemConcentration::logFactor
-                            (predictedFaces_[e][m][f],referenceConcentrations_[e][m],cathodicOrders_[e][m]);
-                    }
-                    catch (const std::exception&) { predictionOK=false; tangentOK=false; }
-                }
-                if (tangentOK)
-                {
-                    const scalar old=beforeFaces_[e][m][f];
-                    if (!std::isfinite(old) || old<=0) { tangentOK=false; continue; }
-                    beforeA[f]+=electroChemConcentration::logFactor
-                        (old,referenceConcentrations_[e][m],anodicOrders_[e][m]);
-                    beforeC[f]+=electroChemConcentration::logFactor
-                        (old,referenceConcentrations_[e][m],cathodicOrders_[e][m]);
-                }
+                const long double dc=static_cast<long double>(potentialDcDj_[e][m][f])*step[e][f];
+                if (!electroChemConcentration::scalarRepresentable(dc)) valid=false;
+                else if (dc<0)
+                    scale=min(scale,scalar(0.95L*potentialAnchor_[e][m][f]/(-dc)));
             }
         }
-        predictedBVResidual_[e]=0; kineticPredictionError_[e]=0;
-        tangentRemainder_[e]=0; potentialSensitivity_[e]=0;
-        potentialTolerance_[e]=GREAT; sweepPotentialEffect_[e]=0;
-        electrolyteEffect_[e]=0; netEtaEffect_[e]=0;
-        compositionEffect_[e]=0; currentStep_[e]=0; decompositionError_[e]=0;
-        bool sensitivityOK=true;
-        forAll(phi,f)
-        {
-            const scalar eta=phiS_[e]-phi[f]-Ebase_[e];
-            DiagnosticBV actual;
-            if (!diagnosticBV(i0_[e],a,c,eta,actualA[f],actualC[f],actual))
-            {
-                predictionOK=false; tangentOK=false; couplingOK=false; sensitivityOK=false;
-                continue;
-            }
-            maxMagnitude(actual.slope,potentialSensitivity_[e],sensitivityOK);
-            if (actual.slope>0)
-            {
-                const long double voltage=currentTolerance(jn[f])/actual.slope;
-                if (scalarDiagnostic(voltage)) potentialTolerance_[e]=min(potentialTolerance_[e],scalar(voltage));
-                else sensitivityOK=false;
-            }
-            if (predictionOK)
-            {
-                const scalar etaPred=phiS_[e]-predictionPhiE_[e][f]-Ebase_[e];
-                DiagnosticBV predicted,actualAtPredictedEta;
-                if (!diagnosticBV(i0_[e],a,c,etaPred,predictedA[f],predictedC[f],predicted)
-                 || !diagnosticBV(i0_[e],a,c,etaPred,actualA[f],actualC[f],actualAtPredictedEta))
-                { predictionOK=false; tangentOK=false; }
-                else
-                {
-                    maxMagnitude(jn[f]+predicted.current,predictedBVResidual_[e],predictionOK);
-                    maxMagnitude(actualAtPredictedEta.current-predicted.current,kineticPredictionError_[e],predictionOK);
-                    maxMagnitude(actual.current-actualAtPredictedEta.current,sweepPotentialEffect_[e],predictionOK);
-                    if (tangentOK)
-                    {
-                        DiagnosticBV root;
-                        const scalar etaRoot=linearizationPhiS_[e]-predictionPhiE_[e][f]-Ebase_[e];
-                        if (!diagnosticBV(i0_[e],a,c,etaRoot,beforeA[f],beforeC[f],root)) tangentOK=false;
-                        else
-                        {
-                            long double tangent=root.current+root.slope*(phiS_[e]-linearizationPhiS_[e]);
-                            forAll(dependencyNames_[e],m)
-                            {
-                                const scalar pa=anodicOrders_[e][m],pc=cathodicOrders_[e][m];
-                                if (pa==0 && pc==0) continue;
-                                const long double old=beforeFaces_[e][m][f];
-                                tangent+=(pa*root.ia-pc*root.ic)/old*(predictedFaces_[e][m][f]-old);
-                            }
-                            maxMagnitude(predicted.current-tangent,tangentRemainder_[e],tangentOK);
-                        }
-                    }
-                }
-            }
-            if (couplingOK)
-            {
-                DiagnosticBV old,crossEta,electrolyte;
-                const scalar oldEta=previousPhiS_[e]-previousPhiE_[e][f]-Ebase_[e];
-                const scalar electrolyteEta=previousPhiS_[e]-phi[f]-Ebase_[e];
-                if (!diagnosticBV(i0_[e],a,c,oldEta,previousLogCa_[e][f],previousLogCc_[e][f],old)
-                 || !diagnosticBV(i0_[e],a,c,eta,previousLogCa_[e][f],previousLogCc_[e][f],crossEta)
-                 || !diagnosticBV(i0_[e],a,c,electrolyteEta,previousLogCa_[e][f],previousLogCc_[e][f],electrolyte))
-                    couplingOK=false;
-                else
-                {
-                    const long double dj=static_cast<long double>(jn[f])-previousCurrent_[e][f];
-                    const long double potential=crossEta.current-old.current;
-                    const long double composition=actual.current-crossEta.current;
-                    const long double residualChange=(jn[f]+actual.current)-(previousCurrent_[e][f]+old.current);
-                    maxMagnitude(dj,currentStep_[e],couplingOK);
-                    maxMagnitude(electrolyte.current-old.current,electrolyteEffect_[e],couplingOK);
-                    maxMagnitude(potential,netEtaEffect_[e],couplingOK);
-                    maxMagnitude(composition,compositionEffect_[e],couplingOK);
-                    maxMagnitude(residualChange-dj-potential-composition,decompositionError_[e],couplingOK);
-                }
-            }
-        }
-        reduce(predictionOK,andOp<bool>()); reduce(tangentOK,andOp<bool>());
-        reduce(couplingOK,andOp<bool>()); reduce(sensitivityOK,andOp<bool>());
-        reduce(predictedBVResidual_[e],maxOp<scalar>());
-        reduce(kineticPredictionError_[e],maxOp<scalar>());
-        reduce(tangentRemainder_[e],maxOp<scalar>());
-        reduce(sweepPotentialEffect_[e],maxOp<scalar>());
-        reduce(potentialSensitivity_[e],maxOp<scalar>());
-        reduce(potentialTolerance_[e],minOp<scalar>());
-        reduce(electrolyteEffect_[e],maxOp<scalar>());
-        reduce(netEtaEffect_[e],maxOp<scalar>());
-        reduce(compositionEffect_[e],maxOp<scalar>());
-        reduce(currentStep_[e],maxOp<scalar>()); reduce(decompositionError_[e],maxOp<scalar>());
-        predictionCurrentValid_[e]=predictionOK;
-        tangentValid_[e]=tangentOK && predictionOK;
-        couplingValid_[e]=couplingOK;
-        if (!sensitivityOK) { potentialSensitivity_[e]=-1; potentialTolerance_[e]=-1; }
-        previousPhiE_[e]=scalarField(phi); previousCurrent_[e]=scalarField(jn);
-        previousLogCa_[e]=actualA; previousLogCc_[e]=actualC; previousPhiS_[e]=phiS_[e];
     }
-    havePreviousState_=true;
+    if (!valid || !std::isfinite(scale) || scale<=0) { finish(); return; }
+    forAll(electrodeNames_,e)
+    {
+        candidates[e]=baseCurrent[e]+scale*step[e];
+        increments[e]=scale*metal[e];
+        responseStepScale_[e]=scale;
+        predictedPotentialMax_[e]*=scale;
+    }
+    potentialResponseStatus_=1;
+    potentialStepScale_=scale;
+    if (scale<1) historyValid=false;
+    finish();
 }
 
 void concentrationButlerVolmer::report() const
 {
     ButlerVolmer::report();
-    if (responseMethod_=="none") return;
+    if (!evaluated_ || converged_ || responseMethod_=="none") return;
+    if (responseMethod_=="boundaryPotential")
+    {
+        Info<< "    Potential response: "
+            << (potentialResponseStatus_==1 ? "active" : potentialResponseStatus_==2 ? "fallback to boundaryTaylor" : "startup")
+            << ", linear iterations=" << potentialSolveIterations_;
+        if (potentialResponseStatus_==1)
+        {
+            scalar predicted=0;
+            forAll(predictedPotentialMax_,e) predicted=max(predicted,predictedPotentialMax_[e]);
+            Info<< ", stepScale=" << potentialStepScale_
+                << ", max|deltaPhiE_predicted|=" << predicted << " V"
+                << ", max Robin residual=" << potentialRowResidual_ << " A/m2"
+                << ", max current defect=" << potentialCurrentDefect_ << " A";
+        }
+        Info<< nl;
+        if (potentialResponseStatus_==1) return;
+    }
+    Info<< "    Concentration response:";
     forAll(electrodeNames_,e)
     {
-        const char* status=responseStatus_[e]==1 ? "active"
-            : responseStatus_[e]==2 ? "fallback" : "startup/identity";
-        Info<< "    boundaryTaylor " << electrodeNames_[e] << ": " << status;
+        Info<< " " << electrodeNames_[e] << '=';
         if (responseStatus_[e]==1)
-            Info<< ", diagonal min/max=" << denominatorMin_[e] << '/' << denominatorMax_[e]
-                << ", stepScale=" << responseStepScale_[e]
-                << ", proposed dPhiS=" << potentialIncrement_[e] << " V";
-        if (predictionTested_)
-            Info<< ", max face prediction error=" << predictionAbsError_[e]
-                << " mol/m3, scaled=" << predictionRelError_[e];
-        Info<< nl;
-        if (!responseDiagnostics_ || !evaluated_) continue;
-        Info<< "    BV prediction " << electrodeNames_[e] << ": ";
-        if (predictionCurrentValid_[e])
-        {
-            Info<< "predicted max residual=" << predictedBVResidual_[e]
-                << " A/m2, concentration error=" << kineticPredictionError_[e]
-                << " A/m2, sweep potential effect=" << sweepPotentialEffect_[e] << " A/m2";
-            if (tangentValid_[e]) Info<< ", Taylor remainder=" << tangentRemainder_[e] << " A/m2";
-            else Info<< ", Taylor remainder=n/a";
-        }
-        else Info<< "prediction=n/a";
-        if (potentialSensitivity_[e]>=0)
-        {
-            Info<< ", max gEta=" << potentialSensitivity_[e] << " A/m2/V";
-            if (potentialSensitivity_[e]>0)
-                Info<< ", min voltage allowance=" << potentialTolerance_[e] << " V";
-        }
-        else Info<< ", sensitivity=n/a";
-        Info<< nl;
-        Info<< "    BV coupling " << electrodeNames_[e] << ": ";
-        if (couplingValid_[e])
-            Info<< "electrolyte effect=" << electrolyteEffect_[e]
-                << " A/m2, net eta effect=" << netEtaEffect_[e]
-                << " A/m2, composition effect=" << compositionEffect_[e]
-                << " A/m2, current step=" << currentStep_[e]
-                << " A/m2, closure=" << decompositionError_[e] << " A/m2";
-        else Info<< "previous tested state unavailable";
-        Info<< nl;
+            Info<< "boundaryTaylor (stepScale=" << responseStepScale_[e] << ')';
+        else Info<< (responseStatus_[e]==2 ? "frozen-state fallback" : "startup/identity");
     }
+    Info<< nl;
 }
 
 } // namespace Foam

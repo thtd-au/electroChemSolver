@@ -7,7 +7,7 @@ namespace Foam
 {
 
 // Reference-state kinetics with arbitrary configured species on each electrode.
-// Concentration kinetics and a direct boundary-response Taylor correction.
+// Concentration kinetics with conservative concentration/potential response.
 // The controller, relaxation and exact acceptance tests remain shared with BV.
 class concentrationButlerVolmer : public ButlerVolmer
 {
@@ -16,27 +16,20 @@ class concentrationButlerVolmer : public ButlerVolmer
 
     List<scalarList> speciesNu_, diffusivity_, chargeNumber_;
     word responseMethod_;
-    bool responseDiagnostics_;
     labelList responseStatus_; // 0=none/startup, 1=Taylor, 2=undefined response
-    scalarList denominatorMin_, denominatorMax_, responseStepScale_;
-    scalarList potentialIncrement_;
-    List<List<scalarField>> predictedFaces_;
-    scalarList predictionAbsError_, predictionRelError_;
-    bool havePrediction_, predictionTested_;
-    scalarList linearizationPhiS_;
-    List<List<scalarField>> beforeFaces_;
-    List<scalarField> predictionPhiE_, previousPhiE_, previousCurrent_;
-    List<scalarField> previousLogCa_, previousLogCc_;
-    scalarList previousPhiS_;
-    bool havePreviousState_;
-    label diagnosticTimeIndex_;
-    scalarList predictedBVResidual_, kineticPredictionError_, tangentRemainder_;
-    scalarList potentialSensitivity_, potentialTolerance_, sweepPotentialEffect_;
-    scalarList electrolyteEffect_, netEtaEffect_, compositionEffect_, currentStep_;
-    scalarList decompositionError_;
-    List<bool> predictionCurrentValid_, tangentValid_, couplingValid_;
+    scalarList responseStepScale_;
 
-    void evaluateResponseDiagnostics();
+    List<scalarField> potentialDiagonal_, potentialSlope_, potentialRhs_;
+    List<List<scalarField>> potentialAnchor_, potentialDcDj_;
+    label potentialResponseStatus_, potentialSolveIterations_;
+    scalar potentialCurrentDefect_, potentialRowResidual_, potentialStepScale_;
+    scalarList predictedPotentialMax_;
+
+    virtual void adjustCurrentCandidates
+    (
+        const List<scalarField>& baseCurrent, List<scalarField>& candidates,
+        scalarList& potentialIncrement, bool& historyValid
+    );
 
     virtual scalar adjustCurrentCandidate
     (
@@ -58,8 +51,6 @@ public:
         fvMesh& mesh, const dictionary& currentDict, const volScalarField& phiE
     );
 
-    virtual void correct();
-    virtual void evaluateConstraint();
     virtual void report() const;
 };
 

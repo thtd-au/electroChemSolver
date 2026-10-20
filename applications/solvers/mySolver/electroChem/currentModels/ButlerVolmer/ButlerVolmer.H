@@ -25,6 +25,9 @@ protected:
     scalarList targetCurrent_, area_, actualCurrent_;
     scalarList bvResidual_, boundaryResidual_;
     labelList rootIterations_;
+    // Reporting only: proposed redistribution and applied changes for the
+    // current transported-and-tested state.
+    scalarList currentChange_, appliedCurrentChange_, metalPotentialChange_;
     scalar T_, F_, R_;
     bool referenceState_;
     scalar absTol_, relTol_, rootAbsTol_, rootRelTol_;
@@ -60,6 +63,12 @@ protected:
         const label, const scalarField&, scalarField&,
         const scalarField&, const scalarField&, bool&
     ) { return 0; }
+
+    // Optional batch correction after every frozen-state electrode root exists.
+    virtual void adjustCurrentCandidates
+    (
+        const List<scalarField>&, List<scalarField>&, scalarList&, bool&
+    ) {}
 
 public:
     TypeName("ButlerVolmer");
