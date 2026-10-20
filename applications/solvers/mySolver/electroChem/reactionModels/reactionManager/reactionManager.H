@@ -108,9 +108,25 @@ class reactionManager
     label coupledMaxBacktracks_;
     scalar coupledReduction_;
     scalar coupledSufficientDecrease_;
-    List<scalarField> transportMatrixResponse(const List<scalarField>& direction) const;
-    List<scalarField> coupledNewtonDirection() const;
-    void applyTransportMatrixCorrection(const List<scalarField>& direction);
+    // All response calculations are read-only predictions. Actual kinetic
+    // rates are still refreshed only by updateKineticRates() in the outer loop.
+    List<scalarField> kineticRefreshResponse() const;
+    List<scalarField> transportMatrixResponse
+    (
+        const List<scalarField>& direction,
+        const List<scalarField>* speciesSource = nullptr
+    ) const;
+    List<scalarField> coupledNewtonDirection
+    (
+        const List<scalarField>& baseline
+    ) const;
+    void applyTransportMatrixCorrection
+    (
+        const List<scalarField>& direction,
+        const List<scalarField>& baseline,
+        const List<scalarField>& kineticResponse,
+        const scalar relaxationCap
+    );
     label outputLevel_; // 0 minimal, 1 picard, 2 full, 3 debug
     bool equilibriumDiagnostics_;
     bool diagnosticStepValid_;
@@ -118,6 +134,7 @@ class reactionManager
     List<scalarField> diagnosticDeltaC_;
     List<scalarField> diagnosticResponse_;
     List<scalarField> diagnosticKineticBefore_;
+    List<scalarField> diagnosticKineticDeltaC_;
     List<scalarField> diagnosticDeltaLambda_;
     scalarField diagnosticAlpha_;
     labelList diagnosticLimiter_;

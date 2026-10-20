@@ -205,7 +205,7 @@ reactionManager::reactionManager
     coupledSufficientDecrease_(1e-4),
     outputLevel_(1), equilibriumDiagnostics_(false), diagnosticStepValid_(false),
     diagnosticBefore_(), diagnosticDeltaC_(), diagnosticResponse_(), diagnosticKineticBefore_(),
-    diagnosticDeltaLambda_(), diagnosticAlpha_(), diagnosticLimiter_(),
+    diagnosticKineticDeltaC_(), diagnosticDeltaLambda_(), diagnosticAlpha_(), diagnosticLimiter_(),
     diagnosticTransported_(),
     equilibriumGram_(0), equilibriumN_(), equilibriumEvaluated_(false),
     equilibriumConverged_(false)
@@ -797,13 +797,63 @@ void reactionManager::correctEquilibrium()
         diagnosticStepValid_ = true;
     }
 
-    applyTransportMatrixCorrection(coupledNewtonDirection());
+    // Predict the source refresh that updateKineticRates() will perform at
+    // the next sweep, without changing the rates used by the completed sweep.
+    List<scalarField> kineticResponse = kineticRefreshResponse();
+    List<scalarField> baseline(species_.size());
+    bool baselineOK = true;
+    scalar maxKineticDeltaC = 0.0;
+    forAll(c_, i)
+    {
+        baseline[i] = c_[i].primitiveField() + kineticResponse[i];
+        forAll(baseline[i], celli)
+        {
+            baselineOK = baselineOK && std::isfinite(baseline[i][celli])
+                && baseline[i][celli] >= 0;
+            maxKineticDeltaC = max
+                (maxKineticDeltaC, mag(kineticResponse[i][celli]));
+        }
+    }
+    reduce(baselineOK, andOp<bool>());
+    reduce(maxKineticDeltaC, maxOp<scalar>());
+
+    scalar relaxationCap = equilibriumRelaxation_;
+    if (!baselineOK)
+    {
+        // Do not evaluate mass-action Jacobians at a negative predicted state.
+        // Retain the tested, damped equilibrium-only path on every processor.
+        // This fallback is conservative damping, not a positivity guarantee.
+        forAll(c_, i)
+        {
+            baseline[i] = c_[i].primitiveField();
+            kineticResponse[i] = 0.0;
+        }
+        relaxationCap = min(relaxationCap, scalar(0.5));
+        Info<< "    Equilibrium kinetic response: fallback to equilibrium-only"
+            << ", predicted baseline not non-negative/finite"
+            << ", relaxation cap=" << relaxationCap << nl;
+    }
+    else if (outputLevel_ >= 2)
+    {
+        Info<< "Equilibrium kinetic response: active, max|deltaC_kinetic|="
+            << maxKineticDeltaC << " mol/m3" << nl;
+    }
+
+    if (equilibriumDiagnostics_) diagnosticKineticDeltaC_ = kineticResponse;
+    applyTransportMatrixCorrection
+    (
+        coupledNewtonDirection(baseline), baseline, kineticResponse,
+        relaxationCap
+    );
     equilibriumEvaluated_ = false;
     equilibriumConverged_ = false;
 }
 
 
-List<scalarField> reactionManager::coupledNewtonDirection() const
+List<scalarField> reactionManager::coupledNewtonDirection
+(
+    const List<scalarField>& baseline
+) const
 {
     const label ne = nEquilibriumReactions(), nc = mesh_.nCells();
     typedef std::vector<scalar> Vector;
@@ -822,7 +872,7 @@ List<scalarField> reactionManager::coupledNewtonDirection() const
     {
         preconditioner[celli].setSize(ne);
         preconditioner[celli] = scalar(0);
-        forAll(c_, i) concentrations[i] = c_[i][celli];
+        forAll(c_, i) concentrations[i] = baseline[i][celli];
         forAll(equilibriumReactionIndices_, r)
         {
             const reactionRecord& rec = reactions_[equilibriumReactionIndices_[r]];
@@ -917,9 +967,42 @@ List<scalarField> reactionManager::coupledNewtonDirection() const
 }
 
 
+List<scalarField> reactionManager::kineticRefreshResponse() const
+{
+    List<scalarField> sourceDelta(species_.size());
+    forAll(sourceDelta, i) sourceDelta[i].setSize(mesh_.nCells(), 0.0);
+    scalarField concentrations(species_.size()), nu(species_.size());
+    forAll(kineticReactionIndices_, k)
+    {
+        const reactionRecord& rec = reactions_[kineticReactionIndices_[k]];
+        nu = 0.0;
+        forAll(rec.speciesIndices, j)
+            nu[rec.speciesIndices[j]] = rec.stoichCoeffs[j];
+        forAll(mesh_.V(), celli)
+        {
+            forAll(c_, i) concentrations[i] = c_[i][celli];
+            const scalar refreshed = rec.model->kineticRate
+                (celli, concentrations, nu);
+            const scalar delta = refreshed - kineticRates_[k][celli];
+            if (!std::isfinite(refreshed) || !std::isfinite(delta))
+                FatalErrorInFunction << "Non-finite predicted kinetic refresh in "
+                    << rec.name << " at cell " << celli << exit(FatalError);
+            forAll(rec.speciesIndices, j)
+                sourceDelta[rec.speciesIndices[j]][celli] +=
+                    rec.stoichCoeffs[j]*delta;
+        }
+    }
+    // Only equilibrium-participating species have stored transport matrices.
+    // Other species keep their current values in the equilibrium prediction.
+    const List<scalarField> noDirection;
+    return transportMatrixResponse(noDirection, &sourceDelta);
+}
+
+
 List<scalarField> reactionManager::transportMatrixResponse
 (
-    const List<scalarField>& direction
+    const List<scalarField>& direction,
+    const List<scalarField>* speciesSource
 ) const
 {
     List<scalarField> response(species_.size());
@@ -963,6 +1046,8 @@ List<scalarField> reactionManager::transportMatrixResponse
         forAll(direction, r)
             responseEqn.source() +=
                 mesh_.V()*equilibriumN_[i][r]*direction[r];
+        if (speciesSource)
+            responseEqn.source() += mesh_.V()*(*speciesSource)[i];
         {
             scalar maxSource = 0.0;
             forAll(responseEqn.source(), celli)
@@ -990,17 +1075,20 @@ List<scalarField> reactionManager::transportMatrixResponse
 
 void reactionManager::applyTransportMatrixCorrection
 (
-    const List<scalarField>& direction
+    const List<scalarField>& direction,
+    const List<scalarField>& baseline,
+    const List<scalarField>& kineticResponse,
+    const scalar relaxationCap
 )
 {
     const List<scalarField> response = transportMatrixResponse(direction);
-    scalar alpha = equilibriumRelaxation_;
+    scalar alpha = relaxationCap;
     label localLimiter = -1, localLimiterCell = -1;
     forAll(species_, i)
     {
         forAll(response[i], celli)
         {
-            const scalar ci = c_[i][celli];
+            const scalar ci = baseline[i][celli];
             const scalar dc = response[i][celli];
             if (!std::isfinite(ci) || ci < 0 || !std::isfinite(dc))
                 FatalErrorInFunction << "Invalid neighbour response for "
@@ -1024,12 +1112,24 @@ void reactionManager::applyTransportMatrixCorrection
             << "is feasible (a zero species may have a negative response)."
             << exit(FatalError);
     {
-        scalar baseSquared = 0.0;
-        forAll(residual_, r)
-            forAll(residual_[r], celli)
-                baseSquared += sqr(residual_[r][celli]/residualScale_[r][celli]);
-        reduce(baseSquared, sumOp<scalar>());
         scalarField concentrations(species_.size()), nu(species_.size()), dFdc;
+        scalar baseSquared = 0.0;
+        forAll(mesh_.V(), celli)
+        {
+            forAll(c_, i) concentrations[i] = baseline[i][celli];
+            forAll(equilibriumReactionIndices_, r)
+            {
+                const reactionRecord& rec = reactions_[equilibriumReactionIndices_[r]];
+                nu = 0.0;
+                forAll(rec.speciesIndices, j)
+                    nu[rec.speciesIndices[j]] = rec.stoichCoeffs[j];
+                scalar F=0, P=0, KR=0;
+                rec.model->equilibriumResidualAndJacobian
+                    (celli, concentrations, nu, F, dFdc, P, KR);
+                baseSquared += sqr(F/residualScale_[r][celli]);
+            }
+        }
+        reduce(baseSquared, sumOp<scalar>());
         bool accepted = false;
         scalar trialSquared = GREAT;
         label backtracks = 0;
@@ -1041,7 +1141,9 @@ void reactionManager::applyTransportMatrixCorrection
             {
                 forAll(c_, i)
                 {
-                    concentrations[i] = c_[i][celli] + alpha*response[i][celli];
+                    // Kinetic refresh happens in full on the next sweep;
+                    // only the equilibrium-source increment is relaxed.
+                    concentrations[i] = baseline[i][celli] + alpha*response[i][celli];
                     valid = valid && std::isfinite(concentrations[i])
                         && concentrations[i] >= 0;
                 }
@@ -1080,7 +1182,7 @@ void reactionManager::applyTransportMatrixCorrection
                 << "No reaction correction was applied." << exit(FatalError);
     }
     if (outputLevel_ >= 2) Info<< "Equilibrium neighbour response: global alpha=" << alpha
-        << ", cap=" << equilibriumRelaxation_ << nl;
+        << ", cap=" << relaxationCap << nl;
     if (outputLevel_ >= 2 && localLimiter >= 0 && localAlpha == alpha)
         Pout<< "Equilibrium global limiter: species=" << species_[localLimiter]
             << " localCell=" << localLimiterCell
@@ -1114,7 +1216,8 @@ void reactionManager::applyTransportMatrixCorrection
             diagnosticLimiter_[celli] = -2;
         }
         forAll(direction, r) diagnosticDeltaLambda_[r] = alpha*direction[r];
-        forAll(response, i) diagnosticDeltaC_[i] = alpha*response[i];
+        forAll(response, i)
+            diagnosticDeltaC_[i] = kineticResponse[i] + alpha*response[i];
     }
 }
 
@@ -1227,6 +1330,7 @@ void reactionManager::reportTransportDiagnostics(const label speciesI)
                 << " before=" << before
                 << " responseUsed=" << diagnosticResponse_[i][celli]
                 << " predictedDeltaC=" << predictedDC
+                << " predictedKineticDeltaC=" << diagnosticKineticDeltaC_[i][celli]
                 << " predictedC=" << before + predictedDC
                 << " kineticBefore=" << diagnosticKineticBefore_[i][celli]
                 << " kineticUsed=" << kineticNow;
