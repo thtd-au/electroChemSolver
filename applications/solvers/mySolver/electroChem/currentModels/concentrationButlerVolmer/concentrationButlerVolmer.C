@@ -1,4 +1,5 @@
 #include "concentrationButlerVolmer.H"
+#include "potentialManager.H"
 #include "addToRunTimeSelectionTable.H"
 #include "IOdictionary.H"
 #include "dimensionSets.H"
@@ -618,6 +619,7 @@ void concentrationButlerVolmer::adjustCurrentCandidates
 void concentrationButlerVolmer::report() const
 {
     ButlerVolmer::report();
+    if (picardOutputLevel(mesh_.time().controlDict()) == 0) return;
     if (!evaluated_ || converged_ || responseMethod_=="none") return;
     if (responseMethod_=="boundaryPotential")
     {

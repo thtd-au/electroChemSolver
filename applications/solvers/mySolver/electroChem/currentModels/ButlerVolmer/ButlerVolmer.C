@@ -1,4 +1,5 @@
 #include "ButlerVolmer.H"
+#include "potentialManager.H"
 #include "addToRunTimeSelectionTable.H"
 #include "IOdictionary.H"
 #include "OStringStream.H"
@@ -657,6 +658,30 @@ bool ButlerVolmer::converged() const
 
 void ButlerVolmer::report() const
 {
+    if (picardOutputLevel(mesh_.time().controlDict()) == 0)
+    {
+        Info<< "    " << type() << ": converged="
+            << (evaluated_ && converged_ ? "yes" : "no") << nl;
+        if (!evaluated_)
+        {
+            Info<< "    Current state has not been evaluated" << nl;
+            return;
+        }
+        forAll(electrodeNames_,e)
+        {
+            Info<< "    " << electrodeNames_[e]
+                << ": max|BV residual|=" << bvResidual_[e]
+                << " A/m2, max|ionic boundary residual|="
+                << boundaryResidual_[e] << " A/m2" << nl;
+            if (!converged_)
+            {
+                Info<< "    |deltaPhiS|=" << metalPotentialChange_[e]
+                    << " V, relaxation=" << activeRelaxation_
+                    << ", root iterations=" << rootIterations_[e] << nl;
+            }
+        }
+        return;
+    }
     Info<< "    " << type() << ": converged=" << (evaluated_ && converged_ ? "yes" : "no")
         << ", absTol=" << absTol_ << " A/m2, relTol=" << relTol_ << nl;
     if (!evaluated_)
