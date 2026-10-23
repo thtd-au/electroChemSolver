@@ -426,15 +426,16 @@ void concentrationButlerVolmer::adjustCurrentCandidates
     {
         if (oldStatus!=potentialResponseStatus_) historyValid=false;
     };
-    if (responseMethod_!="boundaryPotential" || !initialized_)
+    bool eligible=responseMethod_=="boundaryPotential" && initialized_;
+    reduce(eligible,andOp<bool>());
+    if (!eligible)
     { finish(); return; }
     // Local boundaryTaylor candidates are already available for safe fallback.
     potentialResponseStatus_=2;
-    if (Pstream::parRun() || electrodeNames_.size()!=2
-     || !mesh_.foundObject<surfaceScalarField>("kappaFace"))
-    { finish(); return; }
+    eligible=electrodeNames_.size()==2
+        && mesh_.foundObject<surfaceScalarField>("kappaFace");
     forAll(electrodeNames_,e)
-        if (responseStatus_[e]!=1) { finish(); return; }
+        if (responseStatus_[e]!=1) eligible=false;
 
     // This two-solve Schur construction uses the all-flux boundary topology
     // of the supplied case. A fixed-potential reservoir needs a larger Schur
@@ -442,9 +443,12 @@ void concentrationButlerVolmer::adjustCurrentCandidates
     forAll(phiE_.boundaryField(),patchi)
     {
         const fvPatchScalarField& p=phiE_.boundaryField()[patchi];
+        if (electroChemParallel::preserveConstraint(p)) continue;
         if (!isA<fixedGradientFvPatchScalarField>(p) && p.type()!="zeroGradient")
-        { finish(); return; }
+            eligible=false;
     }
+    reduce(eligible,andOp<bool>());
+    if (!eligible) { finish(); return; }
     const surfaceScalarField& conductivity=
         mesh_.lookupObject<surfaceScalarField>("kappaFace");
     bool valid=true;
@@ -455,15 +459,19 @@ void concentrationButlerVolmer::adjustCurrentCandidates
         forAll(conductivity.boundaryField()[p],f)
             if (!std::isfinite(conductivity.boundaryField()[p][f])
              || conductivity.boundaryField()[p][f]<=0) valid=false;
+    reduce(valid,andOp<bool>());
     if (!valid) { finish(); return; }
 
     const IOdictionary& ec=mesh_.lookupObject<IOdictionary>("electroChemistry");
     const word reference=ec.subDict("potential").get<word>("referencePatch");
-    const label refPatch=mesh_.boundaryMesh().findPatchID(reference);
-    if (refPatch<0 || mesh_.boundary()[refPatch].faceCells().empty())
-    { finish(); return; }
-    const label refCell=mesh_.boundary()[refPatch].faceCells()[0];
+    const label refCell=electroChemParallel::referenceCell(mesh_,reference);
     wordList types(mesh_.boundary().size(),"fixedGradient");
+    forAll(phiE_.boundaryField(),patchi)
+    {
+        const fvPatchScalarField& p=phiE_.boundaryField()[patchi];
+        if (electroChemParallel::preserveConstraint(p))
+            types[patchi]=electroChemParallel::constraintType(p);
+    }
     forAll(patchIDs_,e) types[patchIDs_[e]]="mixed";
     volScalarField response0
     (
@@ -509,6 +517,8 @@ void concentrationButlerVolmer::adjustCurrentCandidates
             p1.refValue()[f]=e==1 ? scalar(1) : scalar(0);
         }
     }
+    // No rank may skip a response solve while another rank enters it.
+    reduce(valid,andOp<bool>());
     if (!valid) { finish(); return; }
     response0.correctBoundaryConditions();
     response1.correctBoundaryConditions();
@@ -520,12 +530,18 @@ void concentrationButlerVolmer::adjustCurrentCandidates
     controls.set("minIter",label(1));
     const auto perf0=eqn0.solve(controls);
     potentialSolveIterations_+=perf0.nIterations();
-    if (!perf0.converged()) { finish(); return; }
+    bool solveOK=perf0.converged();
+    reduce(solveOK,andOp<bool>());
+    reduce(potentialSolveIterations_,maxOp<label>());
+    if (!solveOK) { finish(); return; }
     response0.correctBoundaryConditions();
     fvScalarMatrix eqn1(fvm::laplacian(conductivity,response1));
     const auto perf1=eqn1.solve(controls);
     potentialSolveIterations_+=perf1.nIterations();
-    if (!perf1.converged()) { finish(); return; }
+    solveOK=perf1.converged();
+    reduce(solveOK,andOp<bool>());
+    reduce(potentialSolveIterations_,maxOp<label>());
+    if (!solveOK) { finish(); return; }
     response1.correctBoundaryConditions();
 
     const label constrainedPatch=patchIDs_[1];
@@ -540,7 +556,12 @@ void concentrationButlerVolmer::adjustCurrentCandidates
     const long double ratio=-static_cast<long double>(I0)/I1;
     if (!electroChemConcentration::scalarRepresentable(ratio)) { finish(); return; }
     const scalar metal1=scalar(ratio);
-    const scalar gauge=response0[refCell]+metal1*response1[refCell];
+    // Both response equations are anchored by their Robin conditions. Shift
+    // the resulting electrolyte AND metal increments by one common gauge;
+    // do not impose an extra reference-cell constraint on these equations.
+    scalar gauge=refCell>=0
+        ? response0[refCell]+metal1*response1[refCell] : scalar(0);
+    reduce(gauge,sumOp<scalar>());
     if (!std::isfinite(gauge)) { finish(); return; }
     scalarList metal(electrodeNames_.size(),-gauge);
     metal[1]+=metal1;
@@ -602,6 +623,15 @@ void concentrationButlerVolmer::adjustCurrentCandidates
             }
         }
     }
+    // Positivity and exponential limits apply to the entire coupled update.
+    // Validate before reducing scale so a NaN cannot be hidden by minOp.
+    valid=valid && std::isfinite(scale) && scale>0;
+    reduce(valid,andOp<bool>());
+    reduce(scale,minOp<scalar>());
+    reduce(potentialRowResidual_,maxOp<scalar>());
+    reduce(potentialCurrentDefect_,maxOp<scalar>());
+    forAll(predictedPotentialMax_,e)
+        reduce(predictedPotentialMax_[e],maxOp<scalar>());
     if (!valid || !std::isfinite(scale) || scale<=0) { finish(); return; }
     forAll(electrodeNames_,e)
     {

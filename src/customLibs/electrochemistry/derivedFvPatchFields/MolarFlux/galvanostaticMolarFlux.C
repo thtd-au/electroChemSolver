@@ -74,7 +74,9 @@ galvanostaticMolarFlux::galvanostaticMolarFlux
 )
 :
     mixedFvPatchScalarField(ptf, p, iF, mapper),
-    speciesName_(concentrationSpeciesName(iF.name())),
+    // Reconstruction may supply an unnamed/null destination internal field.
+    // Mapping must preserve the source patch metadata without inspecting it.
+    speciesName_(ptf.speciesName_),
     speciesStoichCoeff_(ptf.speciesStoichCoeff_)
 {}
 
@@ -127,7 +129,7 @@ galvanostaticMolarFlux::galvanostaticMolarFlux
 )
 :
     mixedFvPatchScalarField(ptf, iF),
-    speciesName_(concentrationSpeciesName(iF.name())),
+    speciesName_(ptf.speciesName_),
     speciesStoichCoeff_(ptf.speciesStoichCoeff_)
 {}
 
@@ -138,6 +140,10 @@ void galvanostaticMolarFlux::updateCoeffs()
     {
         return;
     }
+
+    // Enforce the concentration-field naming rule when the BC is actually
+    // evaluated, after mapping/cloning has attached it to its real field.
+    speciesName_ = concentrationSpeciesName(internalField().name());
 
     const fvMesh& mesh = patch().boundaryMesh().mesh();
 

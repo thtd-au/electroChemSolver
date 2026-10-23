@@ -10,9 +10,111 @@
 #include "error.H"
 #include "boolList.H"
 #include "token.H"
+#include "fvPatchFields.H"
+#include "PstreamReduceOps.H"
+#include <cmath>
+#include <limits>
 
 namespace Foam
 {
+
+// Shared parallel operations used by the potential and current models.
+namespace electroChemParallel
+{
+
+// Constraint patches are interfaces/geometry, not electrochemical boundaries.
+inline bool preserveConstraint(const fvPatchScalarField& p)
+{
+    return p.coupled() || fvPatch::constraintType(p.patch().type());
+}
+
+inline word constraintType(const fvPatchScalarField& p)
+{
+    return p.coupled() ? p.type() : p.patch().type();
+}
+
+// Collective: every rank must call, including ranks with no reference faces.
+// Select the lexicographically first face centre on the named physical patch.
+// This keeps the physical reference independent of processor numbering for a
+// static mesh with unique face centres. Only its owner returns a local cell.
+inline label referenceCell(const fvMesh& mesh, const word& patchName)
+{
+    const label patchi = mesh.boundaryMesh().findPatchID(patchName);
+    bool valid = patchi >= 0;
+    if (valid) valid = !mesh.boundary()[patchi].coupled();
+    reduce(valid, andOp<bool>());
+    if (!valid)
+    {
+        FatalErrorInFunction
+            << "referencePatch " << patchName
+            << " must exist as a physical patch on every rank"
+            << exit(FatalError);
+    }
+
+    const vectorField& centres = mesh.boundary()[patchi].Cf();
+    const labelUList& cells = mesh.boundary()[patchi].faceCells();
+    const scalar infinity = std::numeric_limits<scalar>::infinity();
+    vector selected(infinity, infinity, infinity);
+    label selectedFace = -1;
+    valid = true;
+    forAll(centres, facei)
+    {
+        const vector& centre = centres[facei];
+        if (!std::isfinite(centre.x()) || !std::isfinite(centre.y())
+         || !std::isfinite(centre.z()))
+        {
+            valid = false;
+            continue;
+        }
+        if (selectedFace < 0 || centre.x() < selected.x()
+         || (centre.x() == selected.x() && centre.y() < selected.y())
+         || (centre.x() == selected.x() && centre.y() == selected.y()
+             && centre.z() < selected.z()))
+        {
+            selected = centre;
+            selectedFace = facei;
+        }
+    }
+    reduce(valid, andOp<bool>());
+    if (!valid)
+    {
+        FatalErrorInFunction << "Non-finite reference face centre on "
+            << patchName << exit(FatalError);
+    }
+
+    scalar x = selected.x();
+    reduce(x, minOp<scalar>());
+    scalar y = selected.x() == x ? selected.y() : infinity;
+    reduce(y, minOp<scalar>());
+    scalar z = selected.x() == x && selected.y() == y
+        ? selected.z() : infinity;
+    reduce(z, minOp<scalar>());
+    label owner = selectedFace >= 0 && selected.x() == x
+        && selected.y() == y && selected.z() == z
+        ? Pstream::myProcNo() : Pstream::nProcs();
+    reduce(owner, minOp<label>());
+    if (owner == Pstream::nProcs())
+    {
+        FatalErrorInFunction << "referencePatch " << patchName
+            << " has no faces globally" << exit(FatalError);
+    }
+    return Pstream::myProcNo() == owner ? cells[selectedFace] : -1;
+}
+
+// Collective, with exactly one valid local reference index across all ranks.
+inline scalar referenceValue(const volScalarField& field, const label celli)
+{
+    scalar value = celli >= 0 ? field[celli] : scalar(0);
+    reduce(value, sumOp<scalar>());
+    if (!std::isfinite(value))
+    {
+        FatalErrorInFunction << "Non-finite reference value for "
+            << field.name() << exit(FatalError);
+    }
+    return value;
+}
+
+} // namespace electroChemParallel
 
 // Shared output policy for the driver and both electrochemical managers.
 inline label picardOutputLevel(const dictionary& controls)

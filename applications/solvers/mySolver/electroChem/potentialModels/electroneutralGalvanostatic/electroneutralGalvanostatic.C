@@ -156,9 +156,11 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
             hasFixedPotential = true;
         }
     }
+    reduce(hasFixedPotential, orOp<bool>());
     if (!hasFixedPotential)
     {
-        const scalar gaugeShift = referencePotential_ - phiE_[referenceCell_];
+        const scalar gaugeShift = referencePotential_
+            - electroChemParallel::referenceValue(phiE_, referenceCell_);
         phiE_.primitiveFieldRef() += gaugeShift;
         forAll(phiE_.boundaryField(), patchi)
         {
@@ -174,26 +176,8 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
 
 void electroneutralGalvanostatic::selectReferenceCell()
 {
-    const labelUList& faceCells = mesh_.boundary()[referencePatchID_].faceCells();
-    label localCandidate = faceCells.empty() ? -1 : faceCells[0];
-
-    // v1 source implementation: deterministic local selection. Parallel-global
-    // reference selection must be compile/runtime verified in the v2512 build.
-    if (Pstream::parRun())
-    {
-        FatalErrorInFunction
-            << "Parallel-safe reference-cell selection for referencePatch "
-            << referencePatchName_ << " still requires v2512 integration verification."
-            << exit(FatalError);
-    }
-    if (localCandidate < 0)
-    {
-        FatalErrorInFunction
-            << "referencePatch " << referencePatchName_ << " has no faces"
-            << exit(FatalError);
-    }
-    referenceCell_ = localCandidate;
-
+    referenceCell_ =
+        electroChemParallel::referenceCell(mesh_, referencePatchName_);
 }
 
 void electroneutralGalvanostatic::updateCurrentFields()
@@ -302,6 +286,12 @@ void electroneutralGalvanostatic::setCorrectionBoundaryConditions
         fvPatchScalarField& dp = deltaPhi.boundaryFieldRef()[patchi];
         const fvPatchScalarField& p = phiE_.boundaryField()[patchi];
 
+        if (electroChemParallel::preserveConstraint(p))
+        {
+            // The distributed solve and geometric BCs handle these patches.
+            continue;
+        }
+
         if (isA<fixedValueFvPatchScalarField>(p))
         {
             fixedValueFvPatchScalarField& dpv =
@@ -350,12 +340,18 @@ void electroneutralGalvanostatic::correct(const bool force)
     bool hasFixedPotential = false;
     forAll(phiE_.boundaryField(), patchi)
     {
-        if (isA<fixedValueFvPatchScalarField>(phiE_.boundaryField()[patchi]))
+        const fvPatchScalarField& p = phiE_.boundaryField()[patchi];
+        if (electroChemParallel::preserveConstraint(p))
+        {
+            correctionPatchTypes[patchi] = electroChemParallel::constraintType(p);
+        }
+        else if (isA<fixedValueFvPatchScalarField>(p))
         {
             correctionPatchTypes[patchi] = "fixedValue";
             hasFixedPotential = true;
         }
     }
+    reduce(hasFixedPotential, orOp<bool>());
 
     volScalarField deltaPhi
     (
