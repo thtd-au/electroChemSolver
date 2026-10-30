@@ -275,8 +275,6 @@ Switch diagSatWritePEqTot(false);
 
 Switch diagInertClosurePrint(false);
 
-Switch diagWaterEquilibriumA(false);
-
 Switch diagDebyePrint(false);
 Switch diagDebyeLog(false);
 label diagDebyeDirection(1);
@@ -392,15 +390,6 @@ if (controlDict.found("diagnostics"))
 
         diagInertClosurePrint =
             d.getOrDefault<Switch>("print", false);
-    }
-
-    if (diagDict.found("waterEquilibrium"))
-    {
-        const dictionary& d =
-            diagDict.subDict("waterEquilibrium");
-
-        diagWaterEquilibriumA =
-            d.getOrDefault<Switch>("diagA", false);
     }
 
     if (diagDict.found("DebyeNumber"))

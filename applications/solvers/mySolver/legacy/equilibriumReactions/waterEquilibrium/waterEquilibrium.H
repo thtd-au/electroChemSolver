@@ -3,7 +3,6 @@
 
 #include "fvMesh.H"
 #include "dictionary.H"
-#include "Switch.H"
 #include "volFields.H"
 
 namespace Foam
@@ -20,7 +19,6 @@ private:
     word OHminusName_;
 
     scalar Kw_;
-    Switch diagA_;
 
     volScalarField& Hplus_;
     volScalarField& OHminus_;
@@ -35,22 +33,6 @@ public:
     );
 
     void apply();
-
-    const word& name() const
-    {
-        return name_;
-    }
-
-    const word& HplusName() const
-    {
-        return HplusName_;
-    }
-
-    const word& OHminusName() const
-    {
-        return OHminusName_;
-    }
-    
 };
 
 } // End namespace Foam
