@@ -178,22 +178,11 @@ void inertMolarConcentration::updateCoeffs()
             << exit(FatalIOError);
     }
 
-    // rho is currently supplied through constant/transportProperties in the
-    // same way as the solver's singlePhaseTransportModel. Read an unregistered
-    // dictionary here so the patch field remains independent of solver-local
-    // variables.
-    IOdictionary transportProperties
-    (
-        IOobject
-        (
-            "transportProperties",
-            mesh.time().constant(),
-            mesh,
-            IOobject::MUST_READ,
-            IOobject::NO_WRITE,
-            false
-        )
-    );
+    // singlePhaseTransportModel has already registered this IOdictionary.
+    // Do not perform potentially collective dictionary reads from a local
+    // boundary callback, whose invocation order can differ between ranks.
+    const IOdictionary& transportProperties =
+        mesh.lookupObject<IOdictionary>("transportProperties");
 
     const dimensionedScalar rho
     (
@@ -257,12 +246,13 @@ void inertMolarConcentration::updateCoeffs()
         fvPatchScalarField& concentrationPatch =
             concentration.boundaryFieldRef()[patchi];
 
-        // Make calculated/custom inlet values current before evaluating the
-        // inert remainder. The inert field itself is skipped above, preventing
-        // recursion through this boundary condition.
-        if (!concentrationPatch.updated())
+        // Complete physical face evaluation, not just coefficient assembly:
+        // mixed BCs otherwise retain their previous face concentration. The
+        // supplied species BCs consume the stored potential gradient; they do
+        // not refresh phiE here. Never evaluate a processor patch individually.
+        if (!concentrationPatch.coupled())
         {
-            concentrationPatch.updateCoeffs();
+            concentrationPatch.evaluate();
         }
 
         const scalarField cPatch(concentrationPatch);

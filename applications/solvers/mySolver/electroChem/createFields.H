@@ -182,14 +182,18 @@ if (controlDict.found("species"))
 
 // Potential controls
 Switch printPhiE(false);
-Switch printGradPhiE(false);
 Switch printKappa(false);
-Switch printJDiff(false);
+boolList printJDiffDirections(3, false);
+bool printJDiff = false;
+boolList printGradPhiEDirections(3, false);
+bool printGradPhiE = false;
 
 Switch writePhiE(false);
-Switch writeGradPhiE(false);
 Switch writeKappa(false);
 Switch writeJDiff(false);
+Switch writeGradPhiE(false);
+Switch writeE(false);
+Switch writeRelE(false);
 
 if (controlDict.found("potential"))
 {
@@ -201,9 +205,14 @@ if (controlDict.found("potential"))
         const dictionary& d = potentialControlDict.subDict("print");
 
         printPhiE     = d.getOrDefault<Switch>("phiE", false);
-        printGradPhiE = d.getOrDefault<Switch>("gradPhiE", false);
         printKappa    = d.getOrDefault<Switch>("kappa", false);
-        printJDiff    = d.getOrDefault<Switch>("jDiff", false);
+        printJDiffDirections = potentialPrintDirections(d, "jDiff");
+        printGradPhiEDirections = potentialPrintDirections(d, "gradPhiE");
+        forAll(printJDiffDirections, cmpt)
+        {
+            printJDiff = printJDiff || printJDiffDirections[cmpt];
+            printGradPhiE = printGradPhiE || printGradPhiEDirections[cmpt];
+        }
     }
 
     if (potentialControlDict.found("write"))
@@ -211,9 +220,11 @@ if (controlDict.found("potential"))
         const dictionary& d = potentialControlDict.subDict("write");
 
         writePhiE     = d.getOrDefault<Switch>("phiE", false);
-        writeGradPhiE = d.getOrDefault<Switch>("gradPhiE", false);
         writeKappa    = d.getOrDefault<Switch>("kappa", false);
         writeJDiff    = d.getOrDefault<Switch>("jDiff", false);
+        writeGradPhiE = d.getOrDefault<Switch>("gradPhiE", false);
+        writeE = d.getOrDefault<Switch>("E", false);
+        writeRelE = d.getOrDefault<Switch>("relE", false);
     }
 }
 
@@ -244,7 +255,6 @@ scalar diagLogInterval(1.0);
 Switch diagTransportPrint(false);
 Switch diagTransportLog(false);
 wordList diagTransportSpecies(0);
-word diagTransportReactionMode("total"); // total | split
 
 Switch diagConservationPrint(false);
 Switch diagConservationLog(false);
@@ -252,14 +262,7 @@ word diagConservationMode("residuals"); // residuals | breakdown
 wordList diagFlowPatches(0);
 wordList diagElectrodePatches(0);
 
-Switch diagElectrodeFluxStabilityPrint(false);
-Switch diagElectrodeFluxStabilityLog(false);
-
-word diagChargeOutput("molarCharge");  // molarCharge | chargeDensity | both
-Switch diagChargePrint(false);
-Switch diagChargeLog(false);
-Switch diagChargeWrite(false);
-
+Switch diagSatLog(false);
 Switch diagSatPrintSi(false);
 Switch diagSatPrintSTot(false);
 Switch diagSatPrintPEqi(false);
@@ -302,19 +305,12 @@ if (controlDict.found("diagnostics"))
 
         diagTransportPrint = d.getOrDefault<Switch>("print", false);
         diagTransportLog   = d.getOrDefault<Switch>("log", false);
-        diagTransportReactionMode =
-            d.getOrDefault<word>("reactionMode", word("total"));
-
-        if
-        (
-            diagTransportReactionMode != "total"
-         && diagTransportReactionMode != "split"
-        )
+        if (d.found("reactionMode"))
         {
-            FatalIOErrorInFunction(d)
-                << "diagnostics/transport/reactionMode must be "
-                << "total or split"
-                << exit(FatalIOError);
+            WarningInFunction
+                << "diagnostics/transport/reactionMode is obsolete and ignored. "
+                << "Transport diagnostics report the total transported reaction source. "
+                << "Remove reactionMode from controlDict." << nl;
         }
 
         if (d.found("species"))
@@ -362,44 +358,11 @@ if (controlDict.found("diagnostics"))
         }
     }
 
-    if (diagDict.found("electrodeFluxStability"))
-    {
-        const dictionary& d =
-            diagDict.subDict("electrodeFluxStability");
-
-        diagElectrodeFluxStabilityPrint =
-            d.getOrDefault<Switch>("print", false);
-
-        diagElectrodeFluxStabilityLog =
-            d.getOrDefault<Switch>("log", false);
-    }
-
-    if (diagDict.found("charge"))
-    {
-        const dictionary& d = diagDict.subDict("charge");
-
-        diagChargeOutput = d.getOrDefault<word>("output", word("molarCharge"));
-        diagChargePrint  = d.getOrDefault<Switch>("print", false);
-        diagChargeLog    = d.getOrDefault<Switch>("log", false);
-        diagChargeWrite  = d.getOrDefault<Switch>("write", false);
-
-        if
-        (
-            diagChargeOutput != "molarCharge"
-         && diagChargeOutput != "chargeDensity"
-         && diagChargeOutput != "both"
-        )
-        {
-            FatalIOErrorInFunction(d)
-                << "diagnostics/charge/output must be "
-                << "molarCharge, chargeDensity, or both"
-                << exit(FatalIOError);
-        }
-    }
-
     if (diagDict.found("saturation"))
     {
         const dictionary& d = diagDict.subDict("saturation");
+
+        diagSatLog = d.getOrDefault<Switch>("log", false);
 
         if (d.found("print"))
         {
@@ -515,15 +478,13 @@ const bool diagTransportActive =
 const bool diagConservationActive =
     diagConservationPrint || diagConservationLog;
 
-const bool diagElectrodeFluxStabilityActive =
-    diagElectrodeFluxStabilityPrint
- || diagElectrodeFluxStabilityLog;
-
-const bool diagChargeActive =
-    diagChargePrint || diagChargeLog || diagChargeWrite;
+// postProcess.H includes createFields without the normal diagnostic call sites.
+(void)diagTransportActive;
+(void)diagConservationActive;
 
 const bool diagSaturationActive =
-    diagSatPrintSi
+    diagSatLog
+ || diagSatPrintSi
  || diagSatPrintSTot
  || diagSatPrintPEqi
  || diagSatPrintPEqTot
@@ -532,19 +493,13 @@ const bool diagSaturationActive =
  || diagSatWritePEqi
  || diagSatWritePEqTot;
 
- const bool diagDebyeActive =
+bool diagDebyeActive =
     diagDebyePrint
+ || diagDebyeWriteIonicSum
  || diagDebyeLog
  || diagDebyeWriteLambda
  || diagDebyeWriteE;
 
-(void)diagTransportActive;
-(void)diagConservationActive;
-(void)diagElectrodeFluxStabilityActive;
-(void)diagChargeActive;
-(void)diagSaturationActive;
-(void)diagDebyeActive;
-(void)diagDebyeDirection;
 
 
 //
@@ -584,7 +539,9 @@ if (reactions.found("chargeNumber"))
 PtrList<volScalarField> c(species.size());
 PtrList<volScalarField> Y(species.size());
 PtrList<volScalarField> Rc(species.size());
-PtrList<volScalarField> Req(species.size());
+// Snapshots from the source used in the final accepted transport sweep.
+List<scalarField> RcKinetic(species.size());
+List<scalarField> RcEquilibrium(species.size());
 
 
 forAll(species, i)
@@ -657,27 +614,24 @@ forAll(species, i)
         )
     );
 
-    Req.set
-    (
-        i,
-        new volScalarField
-        (
-            IOobject
-            (
-                "Req_" + specieName,
-                runTime.timeName(),
-                mesh,
-                IOobject::NO_READ,
-                writeSourceFields
-                ? IOobject::AUTO_WRITE
-                : IOobject::NO_WRITE
-            ),
-            mesh,
-            dimensionedScalar("zero", dimMoles/dimVolume/dimTime, 0.0)
-        )
-    );
 
 }
+// All dependencies now exist. Balance prescribed inlet patches before
+// initial constraint evaluation; this does not project internal concentrations.
+forAll(c, i)
+{
+    forAll(c[i].boundaryField(), patchi)
+    {
+        if (c[i].boundaryField()[patchi].type() == "chargeBalancedConcentration")
+            c[i].boundaryFieldRef()[patchi].evaluate();
+    }
+}
+
+// Reaction chemistry is constructed only after all concentration fields exist.
+// reactionManager owns reaction definitions/stoichiometry/model instances, while
+// the physical concentration fields remain owned by createFields/the solver.
+reactionManager reactionMgr(mesh, reactions, species, c, inertIndex);
+
 // Initial species inventories used by conservation diagnostics.
 // Store these before the first time step so the conservation balance
 // is anchored to the actual case initial condition.
@@ -736,7 +690,7 @@ if (pHActive)
 }
 
 //
-// ############################################ simple-current potential ############################################
+// ############################################ PotentialReaction potential ############################################
 //
 
 if (!electroChemistry.found("potential"))
@@ -746,154 +700,11 @@ if (!electroChemistry.found("potential"))
         << exit(FatalIOError);
 }
 
-const dictionary& potentialDict =
-    electroChemistry.subDict("potential");
+const bool potentialActive =
+    electroChemistry.subDict("potential").get<word>("model") != "none";
 
-word potentialModel
-(
-    potentialDict.getOrDefault<word>("model", word("simpleCurrent"))
-);
-
-if (potentialModel != "simpleCurrent")
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "Unsupported potential model " << potentialModel << nl
-        << "Currently supported model: simpleCurrent"
-        << exit(FatalIOError);
-}
-
-dimensionedScalar jApplied
-(
-    "appliedCurrentDensity",
-    dimCurrentDensity,
-    potentialDict.get<scalar>("appliedCurrentDensity")
-);
-
-vector electrodeNormal
-(
-    potentialDict.get<vector>("electrodeNormal")
-);
-
-const scalar electrodeNormalMag = mag(electrodeNormal);
-
-if (electrodeNormalMag <= SMALL)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "electrodeNormal must be non-zero"
-        << exit(FatalIOError);
-}
-
-electrodeNormal /= electrodeNormalMag;
-
-label potentialDirection = 0;
-scalar largestNormalComponent = mag(electrodeNormal[0]);
-
-for (label dir = 1; dir < vector::nComponents; ++dir)
-{
-    if (mag(electrodeNormal[dir]) > largestNormalComponent)
-    {
-        potentialDirection = dir;
-        largestNormalComponent = mag(electrodeNormal[dir]);
-    }
-}
-
-vector alignedNormal(vector::zero);
-alignedNormal[potentialDirection] =
-    electrodeNormal[potentialDirection] >= 0.0 ? 1.0 : -1.0;
-
-const scalar directionTolerance = 1e-8;
-
-if (mag(electrodeNormal - alignedNormal) > directionTolerance)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "simpleCurrent currently requires electrodeNormal to be "
-        << "aligned with a Cartesian mesh direction." << nl
-        << "Specified electrodeNormal = " << electrodeNormal
-        << exit(FatalIOError);
-}
-
-electrodeNormal = alignedNormal;
-
-word phiEReferencePatchName
-(
-    potentialDict.get<word>("referencePatch")
-);
-
-label phiEReferencePatch =
-    mesh.boundaryMesh().findPatchID(phiEReferencePatchName);
-
-if (phiEReferencePatch < 0)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "Unknown potential referencePatch "
-        << phiEReferencePatchName
-        << exit(FatalIOError);
-}
-
-dimensionedScalar phiERef
-(
-    "referencePotential",
-    dimVoltage,
-    potentialDict.get<scalar>("referencePotential")
-);
-
-dimensionedScalar minConductivity
-(
-    "minConductivity",
-    dimConductivity,
-    potentialDict.getOrDefault<scalar>("minConductivity", SMALL)
-);
-
-if (minConductivity.value() < 0.0)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "minConductivity must be non-negative"
-        << exit(FatalIOError);
-}
-
-if (Pstream::parRun())
-{
-    FatalErrorInFunction
-        << "The first simpleCurrent phiE reconstruction implementation "
-        << "supports serial structured meshes only." << nl
-        << "Parallel column reconstruction has not yet been implemented."
-        << exit(FatalError);
-}
-
-const fvsPatchVectorField& refSf =
-    mesh.Sf().boundaryField()[phiEReferencePatch];
-
-vector refAreaVector(vector::zero);
-
-forAll(refSf, facei)
-{
-    refAreaVector += refSf[facei];
-}
-
-if (mag(refAreaVector) <= SMALL)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "referencePatch " << phiEReferencePatchName
-        << " has zero resultant area vector"
-        << exit(FatalIOError);
-}
-
-const vector referencePatchNormal =
-    refAreaVector/mag(refAreaVector);
-
-if
-(
-    mag(mag(referencePatchNormal & electrodeNormal) - 1.0)
-  > directionTolerance
-)
-{
-    FatalIOErrorInFunction(potentialDict)
-        << "referencePatch " << phiEReferencePatchName
-        << " is not normal to electrodeNormal." << nl
-        << "reference patch normal = " << referencePatchNormal << nl
-        << "electrodeNormal = " << electrodeNormal
-        << exit(FatalIOError);
-}
+Info<< "Potential model: "
+    << electroChemistry.subDict("potential").get<word>("model") << nl;
 
 volScalarField phiE
 (
@@ -902,113 +713,87 @@ volScalarField phiE
         "phiE",
         runTime.timeName(),
         mesh,
-        IOobject::NO_READ,
-        writePhiE 
-        ? IOobject::AUTO_WRITE 
-        : IOobject::NO_WRITE
+        IOobject::MUST_READ,
+        writePhiE ? IOobject::AUTO_WRITE : IOobject::NO_WRITE
     ),
-    mesh,
-    dimensionedScalar("zero", dimVoltage, 0.0)
+    mesh
 );
 
-volVectorField gradPhiE
+// Register and populate the shared electrode currents before any boundary
+// evaluation, including the potential/model none initialization below.
+currentManager currentMgr(mesh, electroChemistry, phiE);
+
+if (!potentialActive)
+{
+    // Preserve patch types and electrode metadata while clearing the field.
+    phiE = dimensionedScalar("zero", phiE.dimensions(), 0.0);
+    phiE.correctBoundaryConditions();
+}
+
+// potentialManager performs runtime selection from electroChemistry/potential/model.
+// The selected model owns electroneutrality evaluation and potential correction.
+potentialManager potentialMgr
 (
-    IOobject
-    (
-        "gradPhiE",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writeGradPhiE 
-        ? IOobject::AUTO_WRITE 
-        : IOobject::NO_WRITE
-    ),
     mesh,
-    dimensionedVector("zero", dimVoltage/dimLength, vector::zero)
+    electroChemistry,
+    reactions,
+    species,
+    c,
+    phiE,
+    T,
+    Rgas,
+    Fdim
 );
 
-volScalarField kappa
-(
-    IOobject
-    (
-        "kappa",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writeKappa 
-        ? IOobject::AUTO_WRITE 
-        : IOobject::NO_WRITE
-    ),
-    mesh,
-    dimensionedScalar("zero", dimConductivity, 0.0)
-);
-
-volVectorField jDiff
-(
-    IOobject
-    (
-        "jDiff",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writeJDiff
-         ? IOobject::AUTO_WRITE
-         : IOobject::NO_WRITE
-    ),
-    mesh,
-    dimensionedVector("zero", dimCurrentDensity, vector::zero)
-);
 
 //
 // ############################################ diagnostics fields  ############################################
 //
 
-const bool writeMolarCharge =
-    diagChargeWrite
- && (
-        diagChargeOutput == "molarCharge"
-     || diagChargeOutput == "both"
-    );
+// Debye resolution output is restricted to active-potential runs.
+if (diagDebyeActive && !potentialMgr.active())
+{
+    WarningInFunction
+        << "DebyeNumber diagnostics requested with potential/model none; "
+        << "disabling Debye print, log and field output for this run." << nl;
+    diagDebyeActive = false;
+    diagDebyePrint = false;
+    diagDebyeLog = false;
+    diagDebyeWriteIonicSum = false;
+    diagDebyeWriteLambda = false;
+    diagDebyeWriteE = false;
+}
 
-const bool writeChargeDensity =
-    diagChargeWrite
- && (
-        diagChargeOutput == "chargeDensity"
-     || diagChargeOutput == "both"
-    );
-
-dimensionSet dimElectricCharge(0, 0, 1, 0, 0, 1, 0);
-
-volScalarField molarCharge
+// Canonical electroneutrality fields: same residual and scale as potentialMgr.
+volScalarField E
 (
-    IOobject
-    (
-        "molarCharge",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writeMolarCharge
-        ? IOobject::AUTO_WRITE
-        : IOobject::NO_WRITE
-    ),
-    mesh,
-    dimensionedScalar("zero", dimMoles/dimVolume, 0.0)
+    IOobject("E", runTime.timeName(), mesh, IOobject::NO_READ,
+        writeE ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
+    mesh, dimensionedScalar("zero", dimMoles/dimVolume, 0.0)
 );
-
-volScalarField chargeDensity
+volScalarField relE
 (
-    IOobject
-    (
-        "chargeDensity",
-        runTime.timeName(),
-        mesh,
-        IOobject::NO_READ,
-        writeChargeDensity
-        ? IOobject::AUTO_WRITE
-        : IOobject::NO_WRITE
-    ),
-    mesh,
-    dimensionedScalar("zero",dimElectricCharge/dimVolume,0.0)
+    IOobject("relE", runTime.timeName(), mesh, IOobject::NO_READ,
+        writeRelE ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
+    mesh, dimensionedScalar("zero", dimless, 0.0)
+);
+volVectorField gradPhiE
+(
+    IOobject("gradPhiE", runTime.timeName(), mesh, IOobject::NO_READ,
+        writeGradPhiE ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
+    mesh, dimensionedVector("zero", dimVoltage/dimLength, vector::zero)
+);
+volScalarField kappaOutput
+(
+    IOobject("kappa", runTime.timeName(), mesh, IOobject::NO_READ,
+        writeKappa ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
+    mesh, dimensionedScalar("zero", dimensionSet(-1,-3,3,0,0,2,0), 0.0)
+);
+volVectorField jDiffOutput
+(
+    IOobject("jDiff", runTime.timeName(), mesh, IOobject::NO_READ,
+        writeJDiff ? IOobject::AUTO_WRITE : IOobject::NO_WRITE),
+    mesh, dimensionedVector("zero", dimensionSet(0,-2,0,0,0,1,0), vector::zero)
 );
 
 volScalarField ionicSumField

@@ -4,6 +4,42 @@
 {
     const scalar dt = runTime.deltaTValue();
 
+    // pH is a post-convergence diagnostic derived from the accepted H+ field.
+    // The floor protects log10 only and never modifies c_Hplus.
+    if (pHActive)
+    {
+        volScalarField& pH = pHPtr();
+        const volScalarField& cH = c[HplusIndex];
+        const scalar cStandard = 1000.0; // 1 mol/L = 1000 mol/m3
+        const scalar cLogFloor = VSMALL*cStandard;
+
+        forAll(pH.primitiveFieldRef(), celli)
+        {
+            pH.primitiveFieldRef()[celli] =
+                -Foam::log10(max(cH[celli], cLogFloor)/cStandard);
+        }
+
+        forAll(pH.boundaryFieldRef(), patchi)
+        {
+            scalarField& pHp = pH.boundaryFieldRef()[patchi];
+            const fvPatchScalarField& cHp = cH.boundaryField()[patchi];
+
+            forAll(pHp, facei)
+            {
+                pHp[facei] =
+                    -Foam::log10(max(cHp[facei], cLogFloor)/cStandard);
+            }
+        }
+
+        if (printPH)
+        {
+            Info<< "pH: min=" << gMin(pH.primitiveField())
+                << " mean="
+                << gSum(pH.primitiveField()*mesh.V())/gSum(mesh.V())
+                << " max=" << gMax(pH.primitiveField()) << nl;
+        }
+    }
+
     const dictionary& diffusivityDict = reactions.subDict("diffusivity");
     const bool hasChargeNumber = reactions.found("chargeNumber");
 
@@ -58,13 +94,12 @@
     static List<scalar> cumulativeAdvection;
     static List<scalar> cumulativeDiffusion;
     static List<scalar> cumulativeMigration;
-    static List<scalar> cumulativeKinetic;
-    static List<scalar> cumulativeEquilibrium;
+    static List<scalar> cumulativeReaction;
+    static List<scalar> cumulativeKineticReaction;
+    static List<scalar> cumulativeEquilibriumReaction;
 
     static autoPtr<OFstream> transportLogPtr;
     static autoPtr<OFstream> conservationLogPtr;
-    static autoPtr<OFstream> electrodeFluxStabilityLogPtr;
-    static autoPtr<OFstream> chargeLogPtr;
     static autoPtr<OFstream> saturationLogPtr;
     static autoPtr<OFstream> DebyeLogPtr;
 
@@ -78,8 +113,9 @@
         cumulativeAdvection.setSize(c.size(), 0.0);
         cumulativeDiffusion.setSize(c.size(), 0.0);
         cumulativeMigration.setSize(c.size(), 0.0);
-        cumulativeKinetic.setSize(c.size(), 0.0);
-        cumulativeEquilibrium.setSize(c.size(), 0.0);
+        cumulativeReaction.setSize(c.size(), 0.0);
+        cumulativeKineticReaction.setSize(c.size(), 0.0);
+        cumulativeEquilibriumReaction.setSize(c.size(), 0.0);
 
         conservationPatchRole.setSize(mesh.boundary().size(), 0);
 
@@ -152,22 +188,11 @@
                     new OFstream(diagDir/"transport.dat")
                 );
 
-                if (diagTransportReactionMode == "total")
-                {
-                    transportLogPtr()
-                        << "# time species "
-                        << "advMax diffMax migMax rxnMax "
-                        << "advInt diffInt migInt rxnInt"
-                        << nl;
-                }
-                else
-                {
-                    transportLogPtr()
-                        << "# time species "
-                        << "advMax diffMax migMax kinMax eqMax "
-                        << "advInt diffInt migInt kinInt eqInt"
-                        << nl;
-                }
+                transportLogPtr()
+                    << "# time species "
+                    << "advMax diffMax migMax rxnKineticMax rxnEquilibriumMax rxnTotalMax "
+                    << "advInt diffInt migInt rxnKineticInt rxnEquilibriumInt rxnTotalInt"
+                    << nl;
             }
 
             if (diagConservationLog)
@@ -182,8 +207,7 @@
                     conservationLogPtr()
                         << "# time species N0 Nt dN "
                         << "transport advection diffusion migration "
-                        << "reaction kinetic equilibrium "
-                        << "residual relativeResidual"
+                        << "reactionKinetic reactionEquilibrium reactionTotal residual relativeResidual"
                         << nl;
                 }
                 else
@@ -192,61 +216,6 @@
                         << "# time species residual relativeResidual"
                         << nl;
                 }
-            }
-
-            if (diagElectrodeFluxStabilityLog)
-            {
-                electrodeFluxStabilityLogPtr.reset
-                (
-                    new OFstream
-                    (
-                        diagDir/"electrodeFluxStability.dat"
-                    )
-                );
-
-                electrodeFluxStabilityLogPtr()
-                    << "# time species patch "
-                    << "Bmin Bmean Bmax "
-                    << "robinSafetyMin robinSafetyMean robinSafetyMax"
-                    << nl;
-            }
-
-            if (diagChargeLog)
-            {
-                chargeLogPtr.reset
-                (
-                    new OFstream(diagDir/"charge.dat")
-                );
-
-                OFstream& os = chargeLogPtr();
-
-                os << "# time";
-
-                if
-                (
-                    diagChargeOutput == "molarCharge"
-                 || diagChargeOutput == "both"
-                )
-                {
-                    os  << " molarMin"
-                        << " molarMean"
-                        << " molarMax"
-                        << " totalMolarCharge";
-                }
-
-                if
-                (
-                    diagChargeOutput == "chargeDensity"
-                 || diagChargeOutput == "both"
-                )
-                {
-                    os  << " chargeMin"
-                        << " chargeMean"
-                        << " chargeMax"
-                        << " totalCharge";
-                }
-
-                os << nl;
             }
 
             if (diagDebyeLog)
@@ -261,16 +230,7 @@
                     << nl;
             }
 
-            if
-            (
-                diagSaturationActive
-             && (
-                    diagSatPrintSi
-                 || diagSatPrintSTot
-                 || diagSatPrintPEqi
-                 || diagSatPrintPEqTot
-                )
-            )
+            if (diagSatLog)
             {
                 saturationLogPtr.reset
                 (
@@ -288,61 +248,32 @@
         diagnosticsInitialised = true;
     }
 
-// ############################################################ print species  ############################################################
+// ############################################################ Species state ############################################################
 
-    if (printCFields || printCFieldsBeforeClipping)
+    // Report the accepted post-convergence concentration state.
+    if (printCFields)
     {
         Info<< "Concentration fields:" << nl;
 
-        if (printCFieldsBeforeClipping)
+        forAll(c, i)
         {
-            Info<< "  Pre-clipping:" << nl;
+            const scalar cMin =
+                gMin(c[i].primitiveField());
 
-            forAll(c, i)
-            {
-                Info<< "    " << c[i].name()
-                    << " min/mean/max = "
-                    << cMinBeforeClipping[i] << " / "
-                    << cMeanBeforeClipping[i] << " / "
-                    << cMaxBeforeClipping[i]
-                    << " mol/m3"
-                    << nl;
-            }
-        }
+            const scalar cMean =
+                gSum(c[i].primitiveField()*mesh.V())
+               /gSum(mesh.V());
 
-        if (printCFields)
-        {
-            if (printCFieldsBeforeClipping)
-            {
-                Info<< "  After clipping:" << nl;
-            }
+            const scalar cMax =
+                gMax(c[i].primitiveField());
 
-            forAll(c, i)
-            {
-                const scalar cMin =
-                    gMin(c[i].primitiveField());
-
-                const scalar cMean =
-                    gSum(c[i].primitiveField()*mesh.V())
-                /gSum(mesh.V());
-
-                const scalar cMax =
-                    gMax(c[i].primitiveField());
-
-                Info<<
-                    (
-                        printCFieldsBeforeClipping
-                    ? "    "
-                    : "  "
-                    )
-                    << c[i].name()
-                    << " min/mean/max = "
-                    << cMin << " / "
-                    << cMean << " / "
-                    << cMax
-                    << " mol/m3"
-                    << nl;
-            }
+            Info<< "  " << c[i].name()
+                << " min/mean/max = "
+                << cMin << " / "
+                << cMean << " / "
+                << cMax
+                << " mol/m3"
+                << nl;
         }
 
         Info<< nl;
@@ -427,9 +358,15 @@
                     IOobject::NO_READ,
                     IOobject::NO_WRITE
                 ),
-                fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)
-              * (fvc::interpolate(gradPhiE) & mesh.Sf())
+                mesh,
+                dimensionedScalar("zero", dimMoles/dimTime, 0.0)
             );
+            if (potentialMgr.active())
+            {
+                migrationFlux = fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)
+                    * (fvc::snGrad(phiE)*mesh.magSf());
+            }
+
 
             volScalarField advTerm
             (
@@ -470,73 +407,39 @@
                 fvc::div(migrationFlux)
             );
 
-            tmp<volScalarField> tTotalReaction =
-                Rc[i] + Req[i];
+            const volScalarField& totalReaction = Rc[i];
 
-            const volScalarField& totalReaction =
-                tTotalReaction();
-
-            const scalar advMax =
-                max(mag(advTerm)).value();
-
-            const scalar diffMax =
-                max(mag(diffTerm)).value();
-
-            const scalar migMax =
-                max(mag(migTerm)).value();
-
-            const scalar kinMax =
-                max(mag(Rc[i])).value();
-
-            const scalar eqMax =
-                max(mag(Req[i])).value();
-
-            const scalar rxnMax =
-                max(mag(totalReaction)).value();
+            const scalar advMax = max(mag(advTerm)).value();
+            const scalar diffMax = max(mag(diffTerm)).value();
+            const scalar migMax = max(mag(migTerm)).value();
+            const scalar rxnMax = max(mag(totalReaction)).value();
+            const scalar kineticMax = gMax(mag(RcKinetic[i]));
+            const scalar equilibriumMax = gMax(mag(RcEquilibrium[i]));
 
             const scalar advInt =
                 gSum(mag(advTerm.primitiveField())*mesh.V());
-
             const scalar diffInt =
                 gSum(mag(diffTerm.primitiveField())*mesh.V());
-
             const scalar migInt =
                 gSum(mag(migTerm.primitiveField())*mesh.V());
-
-            const scalar kinInt =
-                gSum(mag(Rc[i].primitiveField())*mesh.V());
-
-            const scalar eqInt =
-                gSum(mag(Req[i].primitiveField())*mesh.V());
-
             const scalar rxnInt =
                 gSum(mag(totalReaction.primitiveField())*mesh.V());
 
+            const scalar kineticInt = gSum(mag(RcKinetic[i])*mesh.V());
+            const scalar equilibriumInt = gSum(mag(RcEquilibrium[i])*mesh.V());
+
             if (diagTransportPrint)
             {
-                if (diagTransportReactionMode == "total")
-                {
-                    Info<< "  " << specieName
-                        << " max|adv diff mig rxn| = "
-                        << advMax << " "
-                        << diffMax << " "
-                        << migMax << " "
-                        << rxnMax
-                        << " [mol/m3/s]"
-                        << nl;
-                }
-                else
-                {
-                    Info<< "  " << specieName
-                        << " max|adv diff mig kin eq| = "
-                        << advMax << " "
-                        << diffMax << " "
-                        << migMax << " "
-                        << kinMax << " "
-                        << eqMax
-                        << " [mol/m3/s]"
-                        << nl;
-                }
+                Info<< "  " << specieName
+                    << " max|adv diff mig rxnKinetic rxnEquilibrium rxnTotal| = "
+                    << advMax << " "
+                    << diffMax << " "
+                    << migMax << " "
+                    << kineticMax << " "
+                    << equilibriumMax << " "
+                    << rxnMax
+                    << " [mol/m3/s]"
+                    << nl;
             }
 
             if
@@ -552,28 +455,16 @@
                     << specieName << ' '
                     << advMax << ' '
                     << diffMax << ' '
-                    << migMax << ' ';
-
-                if (diagTransportReactionMode == "total")
-                {
-                    os  << rxnMax << ' '
-                        << advInt << ' '
-                        << diffInt << ' '
-                        << migInt << ' '
-                        << rxnInt;
-                }
-                else
-                {
-                    os  << kinMax << ' '
-                        << eqMax << ' '
-                        << advInt << ' '
-                        << diffInt << ' '
-                        << migInt << ' '
-                        << kinInt << ' '
-                        << eqInt;
-                }
-
-                os << nl;
+                    << migMax << ' '
+                    << kineticMax << ' '
+                    << equilibriumMax << ' '
+                    << rxnMax << ' '
+                    << advInt << ' '
+                    << diffInt << ' '
+                    << migInt << ' '
+                    << kineticInt << ' '
+                    << equilibriumInt << ' '
+                    << rxnInt << nl;
             }
         }
 
@@ -651,11 +542,10 @@
                 tmp<scalarField> tsnGradCp = cp.snGrad();
                 const scalarField& snGradCp = tsnGradCp();
 
-                const fvPatchVectorField& gradPhiEp =
-                    gradPhiE.boundaryField()[patchi];
-
-                const fvsPatchVectorField& Sfp =
-                    mesh.Sf().boundaryField()[patchi];
+                const fvPatchScalarField& phiEp =
+                    phiE.boundaryField()[patchi];
+                scalarField snGradPhiE(phiEp.size(), 0.0);
+                if (potentialMgr.active()) snGradPhiE = phiEp.snGrad();
 
                 forAll(cp, facei)
                 {
@@ -674,7 +564,8 @@
                        *Fdim.value()
                        /(Rgas.value()*T.value())
                        *cp[facei]
-                       *(gradPhiEp[facei] & Sfp[facei]);
+                       *snGradPhiE[facei]
+                       *magSfp[facei];
                 }
             }
 
@@ -687,14 +578,15 @@
             cumulativeDiffusion[i] += -diffOutRate*dt;
             cumulativeMigration[i] += -migOutRate*dt;
 
-            const scalar kineticRate =
+            const scalar reactionRate =
                 gSum(Rc[i].primitiveField()*mesh.V());
 
-            const scalar equilibriumRate =
-                gSum(Req[i].primitiveField()*mesh.V());
-
-            cumulativeKinetic[i] += kineticRate*dt;
-            cumulativeEquilibrium[i] += equilibriumRate*dt;
+            cumulativeReaction[i] += reactionRate*dt;
+            if (diagConservationMode == "breakdown")
+            {
+                cumulativeKineticReaction[i] += gSum(RcKinetic[i]*mesh.V())*dt;
+                cumulativeEquilibriumReaction[i] += gSum(RcEquilibrium[i]*mesh.V())*dt;
+            }
 
             const scalar Nt =
                 gSum(ci.primitiveField()*mesh.V());
@@ -706,9 +598,7 @@
               + cumulativeDiffusion[i]
               + cumulativeMigration[i];
 
-            const scalar reaction =
-                cumulativeKinetic[i]
-              + cumulativeEquilibrium[i];
+            const scalar reaction = cumulativeReaction[i];
 
             const scalar residual =
                 dN - transport - reaction;
@@ -725,11 +615,7 @@
                             mag(cumulativeMigration[i])
                         )
                     ),
-                    max
-                    (
-                        mag(cumulativeKinetic[i]),
-                        mag(cumulativeEquilibrium[i])
-                    )
+                    mag(cumulativeReaction[i])
                 );
 
             const scalar relativeResidual =
@@ -748,11 +634,9 @@
                         << cumulativeDiffusion[i] << " mol" << nl
                         << "      migration = "
                         << cumulativeMigration[i] << " mol" << nl
-                        << "    reaction    = " << reaction << " mol" << nl
-                        << "      kinetic   = "
-                        << cumulativeKinetic[i] << " mol" << nl
-                        << "      equilibrium = "
-                        << cumulativeEquilibrium[i] << " mol" << nl
+                        << "    reaction total = " << reaction << " mol" << nl
+                        << "      kinetic      = " << cumulativeKineticReaction[i] << " mol" << nl
+                        << "      equilibrium  = " << cumulativeEquilibriumReaction[i] << " mol" << nl
                         << "    residual    = " << residual << " mol" << nl
                         << "    rel         = " << relativeResidual << nl;
                 }
@@ -785,9 +669,9 @@
                         << cumulativeAdvection[i] << ' '
                         << cumulativeDiffusion[i] << ' '
                         << cumulativeMigration[i] << ' '
+                        << cumulativeKineticReaction[i] << ' '
+                        << cumulativeEquilibriumReaction[i] << ' '
                         << reaction << ' '
-                        << cumulativeKinetic[i] << ' '
-                        << cumulativeEquilibrium[i] << ' '
                         << residual << ' '
                         << relativeResidual
                         << nl;
@@ -806,289 +690,6 @@
         if (diagConservationPrint)
         {
             Info<< endl;
-        }
-    }
-
-// ############################################################ Electrode flux stability ############################################################
-
-    if (diagElectrodeFluxStabilityActive)
-    {
-        if (diagElectrodeFluxStabilityPrint)
-        {
-            Info<< "Electrode flux stability diagnostics:" << nl;
-        }
-
-        forAll(c, i)
-        {
-            scalar zi = 0.0;
-
-            if (zDictPtr)
-            {
-                zi =
-                    zDictPtr->getOrDefault<scalar>
-                    (
-                        species[i],
-                        0.0
-                    );
-            }
-
-            if (mag(zi) <= SMALL)
-            {
-                continue;
-            }
-
-            const volScalarField& ci = c[i];
-
-            forAll(mesh.boundary(), patchi)
-            {
-                if (conservationPatchRole[patchi] != 2)
-                {
-                    continue;
-                }
-
-                const fvPatchScalarField& cp =
-                    ci.boundaryField()[patchi];
-
-                // This diagnostic describes the Robin migration coupling,
-                // so only report species that actually use robinMolarFlux on
-                // the configured electrode patch.
-                if (cp.type() != "robinMolarFlux")
-                {
-                    continue;
-                }
-
-                const fvPatch& patch = mesh.boundary()[patchi];
-
-                if (!patch.size())
-                {
-                    continue;
-                }
-
-                const scalarField& delta =
-                    patch.deltaCoeffs();
-
-                const vectorField nf(patch.nf());
-
-                const fvPatchVectorField& gradPhiEp =
-                    gradPhiE.boundaryField()[patchi];
-
-                scalarField B(patch.size(), 0.0);
-                scalarField robinSafety(patch.size(), 0.0);
-
-                forAll(B, facei)
-                {
-                    const scalar normalGradPhiE =
-                        gradPhiEp[facei] & nf[facei];
-
-                    const scalar beta =
-                        zi
-                       *Fdim.value()
-                       /(Rgas.value()*T.value())
-                       *normalGradPhiE;
-
-                    B[facei] =
-                        mag(beta/delta[facei]);
-
-                    robinSafety[facei] =
-                        mag((delta[facei] + beta)/delta[facei]);
-                }
-
-                const fvsPatchScalarField& magSf =
-                    mesh.magSf().boundaryField()[patchi];
-
-                const scalar patchArea = gSum(magSf);
-
-                const scalar BMin = gMin(B);
-                const scalar BMax = gMax(B);
-                const scalar BMean =
-                    gSum(B*magSf)/(patchArea + VSMALL);
-
-                const scalar safetyMin = gMin(robinSafety);
-                const scalar safetyMax = gMax(robinSafety);
-                const scalar safetyMean =
-                    gSum(robinSafety*magSf)/(patchArea + VSMALL);
-
-                if (diagElectrodeFluxStabilityPrint)
-                {
-                    Info<< "  " << ci.name()
-                        << " patch " << patch.name() << nl
-                        << "    B=|beta/delta| min/mean/max = "
-                        << BMin << " / "
-                        << BMean << " / "
-                        << BMax << nl
-                        << "    Robin safety |delta+beta|/delta "
-                        << "min/mean/max = "
-                        << safetyMin << " / "
-                        << safetyMean << " / "
-                        << safetyMax << nl;
-                }
-
-                if
-                (
-                    diagLogTime
-                 && diagElectrodeFluxStabilityLog
-                 && electrodeFluxStabilityLogPtr.valid()
-                )
-                {
-                    electrodeFluxStabilityLogPtr()
-                        << runTime.value() << ' '
-                        << species[i] << ' '
-                        << patch.name() << ' '
-                        << BMin << ' '
-                        << BMean << ' '
-                        << BMax << ' '
-                        << safetyMin << ' '
-                        << safetyMean << ' '
-                        << safetyMax
-                        << nl;
-                }
-            }
-        }
-
-        if (diagElectrodeFluxStabilityPrint)
-        {
-            Info<< endl;
-        }
-    }
-
-// ############################################################ Charge ############################################################
-
-    if (diagChargeActive)
-    {
-        molarCharge =
-            dimensionedScalar
-            (
-                "zero",
-                dimMoles/dimVolume,
-                0.0
-            );
-
-        forAll(c, i)
-        {
-            const word& specieName = species[i];
-
-            scalar zi = 0.0;
-
-            if (zDictPtr)
-            {
-                zi =
-                    zDictPtr->getOrDefault<scalar>
-                    (
-                        specieName,
-                        0.0
-                    );
-            }
-
-            if (mag(zi) > SMALL)
-            {
-                molarCharge += zi*c[i];
-            }
-        }
-
-        chargeDensity = Fdim*molarCharge;
-
-        const scalar molarChargeMin =
-            min(molarCharge).value();
-
-        const scalar molarChargeMax =
-            max(molarCharge).value();
-
-        const scalar molarChargeMean =
-            gSum(molarCharge.primitiveField()*mesh.V())
-        /gSum(mesh.V());
-
-        const scalar chargeDensityMin =
-            min(chargeDensity).value();
-
-        const scalar chargeDensityMax =
-            max(chargeDensity).value();
-
-        const scalar chargeDensityMean =
-            gSum(chargeDensity.primitiveField()*mesh.V())
-        /gSum(mesh.V());
-
-        const scalar totalMolarCharge =
-            gSum(molarCharge.primitiveField()*mesh.V());
-
-        const scalar totalCharge =
-            gSum(chargeDensity.primitiveField()*mesh.V());
-
-        if (diagChargePrint)
-        {
-            Info<< "Charge diagnostics:" << nl;
-
-            if
-            (
-                diagChargeOutput == "molarCharge"
-            || diagChargeOutput == "both"
-            )
-            {
-                Info<< "  molarCharge min/mean/max = "
-                    << molarChargeMin << " / "
-                    << molarChargeMean << " / "
-                    << molarChargeMax
-                    << " mol/m3"
-                    << nl;
-
-                Info<< "  total molar charge = "
-                    << totalMolarCharge
-                    << " mol"
-                    << nl;
-            }
-
-            if
-            (
-                diagChargeOutput == "chargeDensity"
-            || diagChargeOutput == "both"
-            )
-            {
-                Info<< "  chargeDensity min/mean/max = "
-                    << chargeDensityMin << " / "
-                    << chargeDensityMean << " / "
-                    << chargeDensityMax
-                    << " C/m3"
-                    << nl;
-
-                Info<< "  total charge = "
-                    << totalCharge
-                    << " C"
-                    << nl;
-            }
-
-            Info<< endl;
-        }
-
-        if (diagLogTime && diagChargeLog && chargeLogPtr.valid())
-        {
-            OFstream& os = chargeLogPtr();
-
-            os << runTime.value();
-
-            if
-            (
-                diagChargeOutput == "molarCharge"
-            || diagChargeOutput == "both"
-            )
-            {
-                os  << ' ' << molarChargeMin
-                    << ' ' << molarChargeMean
-                    << ' ' << molarChargeMax
-                    << ' ' << totalMolarCharge;
-            }
-
-            if
-            (
-                diagChargeOutput == "chargeDensity"
-            || diagChargeOutput == "both"
-            )
-            {
-                os  << ' ' << chargeDensityMin
-                    << ' ' << chargeDensityMean
-                    << ' ' << chargeDensityMax
-                    << ' ' << totalCharge;
-            }
-
-            os << nl;
         }
     }
 
@@ -1120,6 +721,8 @@ if (diagDebyeActive)
             0.0
         );
 
+    // Debye sum is sum(z_i^2*c_i); the potential charge scale instead
+    // uses sum(|z_i|*c_i) with an absolute-tolerance floor.
     forAll(c, i)
     {
         scalar zi = 0.0;
@@ -1334,7 +937,7 @@ if (diagDebyeActive)
             }
 
             // No collective operations inside this master-only block.
-            if (diagLogTime && saturationLogPtr.valid())
+            if (diagSatLog && diagLogTime && saturationLogPtr.valid())
             {
                 saturationLogPtr()
                     << runTime.value() << ' '

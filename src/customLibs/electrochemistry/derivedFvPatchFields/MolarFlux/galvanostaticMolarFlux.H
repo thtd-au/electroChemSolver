@@ -1,57 +1,55 @@
-#ifndef robinMolarFlux_H
-#define robinMolarFlux_H
+#ifndef galvanostaticMolarFlux_H
+#define galvanostaticMolarFlux_H
 
 #include "mixedFvPatchFields.H"
 
 namespace Foam
 {
 
-class robinMolarFlux
+class galvanostaticMolarFlux
 :
     public mixedFvPatchScalarField
 {
-    // Species name as used in constant/reactions.
+    // Species name inferred from the concentration field name c_<species>.
     word speciesName_;
 
-    // Stoichiometric coefficient in the electrode half reaction.
-    scalar stoichCoeff_;
-
-    // Number of electrons transferred in the electrode half reaction.
-    scalar nElectrons_;
+    // Stoichiometric coefficient of this aqueous species in the electrode
+    // half-reaction. Positive means production, negative consumption.
+    scalar speciesStoichCoeff_;
 
 public:
 
-    TypeName("robinMolarFlux");
+    TypeName("galvanostaticMolarFlux");
 
-    robinMolarFlux
+    galvanostaticMolarFlux
     (
         const fvPatch&,
         const DimensionedField<scalar, volMesh>&
     );
 
-    robinMolarFlux
+    galvanostaticMolarFlux
     (
-        const robinMolarFlux&,
+        const galvanostaticMolarFlux&,
         const fvPatch&,
         const DimensionedField<scalar, volMesh>&,
         const fvPatchFieldMapper&
     );
 
-    robinMolarFlux
+    galvanostaticMolarFlux
     (
         const fvPatch&,
         const DimensionedField<scalar, volMesh>&,
         const dictionary&
     );
 
-    robinMolarFlux
+    galvanostaticMolarFlux
     (
-        const robinMolarFlux&
+        const galvanostaticMolarFlux&
     );
 
-    robinMolarFlux
+    galvanostaticMolarFlux
     (
-        const robinMolarFlux&,
+        const galvanostaticMolarFlux&,
         const DimensionedField<scalar, volMesh>&
     );
 
@@ -59,7 +57,7 @@ public:
     {
         return tmp<fvPatchScalarField>
         (
-            new robinMolarFlux(*this)
+            new galvanostaticMolarFlux(*this)
         );
     }
 
@@ -70,7 +68,7 @@ public:
     {
         return tmp<fvPatchScalarField>
         (
-            new robinMolarFlux(*this, iF)
+            new galvanostaticMolarFlux(*this, iF)
         );
     }
 

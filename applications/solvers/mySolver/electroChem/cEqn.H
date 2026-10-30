@@ -1,5 +1,4 @@
-// cEqn.H
-label inertIndex = species.find(inertSpecie);
+// cEqn.H -- PotentialReaction reactive Nernst-Planck transport
 
 const dictionary& diffusivityDict = reactions.subDict("diffusivity");
 const bool hasChargeNumber = reactions.found("chargeNumber");
@@ -14,234 +13,137 @@ surfaceScalarField gradPhiEFlux
         IOobject::NO_READ,
         IOobject::NO_WRITE
     ),
-    fvc::interpolate(gradPhiE) & mesh.Sf()
+    mesh,
+    dimensionedScalar("zero", phiE.dimensions()*dimLength, 0.0)
 );
 
-forAll(Rc, i)
+if (potentialMgr.active())
 {
-    tmp<volScalarField> tSource
+    gradPhiEFlux = fvc::snGrad(phiE)*mesh.magSf();
+}
+
+// Kinetic rates are frozen for the complete species sweep and are updated
+// exactly once by electroChem.C before this include is entered.
+
+reactionMgr.beginTransportDiagnostics();
+
+forAll(c, i)
+{
+    if (i == inertIndex)
+    {
+        continue;
+    }
+
+    volScalarField& ci = c[i];
+
+    dimensionedScalar Di
     (
-        reactionMgr.kineticSource(species[i])
+        "D_" + species[i],
+        dimArea/dimTime,
+        diffusivityDict.get<scalar>(species[i])
     );
 
-    Rc[i] = tSource();
-}
-
-// Store concentration statistics before positivity clipping.
-// These are printed later in diagnostics.H so that solver output
-// is not interrupted by diagnostic messages.
-scalarList cMinBeforeClipping(c.size(), 0.0);
-scalarList cMeanBeforeClipping(c.size(), 0.0);
-scalarList cMaxBeforeClipping(c.size(), 0.0);
-
-const scalar domainVolume = gSum(mesh.V());
-
-// Initialise all species, including the inert species.
-// Active species values are overwritten immediately after their solves.
-forAll(c, i)
-{
-    cMinBeforeClipping[i] = gMin(c[i].primitiveField());
-    cMeanBeforeClipping[i] = gSum(c[i].primitiveField()*mesh.V())/domainVolume;
-    cMaxBeforeClipping[i] = gMax(c[i].primitiveField());
-}
-
-// Solve concentration transport
-forAll(c, i)
-{
-    if (i != inertIndex)
+    scalar zi = 0.0;
+    if (hasChargeNumber)
     {
-        volScalarField& ci = c[i];
-        // const scalarField cBeforeTransport(ci.primitiveField());
-
-        dimensionedScalar Di
-        (
-            "D_" + species[i],
-            dimArea/dimTime,
-            diffusivityDict.get<scalar>(species[i])
-        );
-
-        scalar zi = 0.0;
-
-        if (hasChargeNumber)
-        {
-            const dictionary& zDict = reactions.subDict("chargeNumber");
-            zi = zDict.getOrDefault<scalar>(species[i], 0.0);
-        }
-
-        surfaceScalarField migrationFlux
-        (
-            IOobject
-            (
-                "migrationFlux_" + species[i],
-                runTime.timeName(),
-                mesh,
-                IOobject::NO_READ,
-                IOobject::NO_WRITE
-            ),
-            fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)
-          * gradPhiEFlux
-        );
-
-        fvScalarMatrix ciEqn
-        (
-            fvm::ddt(ci)
-          + fvm::div(phi, ci)
-         ==
-            fvm::laplacian(Di, ci)
-          + fvc::div(migrationFlux)
-          + Rc[i]
-          + fvOptions(ci)
-        );
-
-        ciEqn.relax();
-        fvOptions.constrain(ciEqn);
-        ciEqn.solve(ci.name());
-        fvOptions.correct(ci);
-
-        // Save the raw transport solution before positivity clipping.
-        if (printCFieldsBeforeClipping)
-        {
-            cMinBeforeClipping[i] =
-                gMin(ci.primitiveField());
-
-            cMeanBeforeClipping[i] =
-                gSum(ci.primitiveField()*mesh.V())
-            /domainVolume;
-
-            cMaxBeforeClipping[i] =
-                gMax(ci.primitiveField());
-        }
-        
-        // ci.max(0.0);
-        ci.correctBoundaryConditions();
+        zi = reactions.subDict("chargeNumber")
+            .getOrDefault<scalar>(species[i], 0.0);
     }
-}
 
-// Store internal concentrations immediately before the fast equilibrium projection. 
-List<scalarField> cBeforeEquilibrium(c.size());
-
-forAll(c, i)
-{
-    cBeforeEquilibrium[i] = c[i].primitiveField();
-
-    Req[i] =
-        dimensionedScalar
-        (
-            "zero",
-            dimMoles/dimVolume/dimTime,
-            0.0
-        );
-}
-
-// Store the water-equilibrium invariant before projection.
-// Only allocate/populate this when the diagnostic is requested and a waterEquilibrium model actually exists.
-List<scalarField> waterAPreclip;
-
-if(diagWaterEquilibriumA  && reactionMgr.hasWaterEquilibrium())
-{
-    waterAPreclip.setSize
+    surfaceScalarField migrationFlux
     (
-        reactionMgr.nWaterEquilibriumReactions()
+        IOobject
+        (
+            "migrationFlux_" + species[i],
+            runTime.timeName(),
+            mesh,
+            IOobject::NO_READ,
+            IOobject::NO_WRITE
+        ),
+        fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)*gradPhiEFlux
     );
 
-    for
+    const bool captureReactionSplit = diagTransportActive || diagConservationActive;
+    tmp<volScalarField> tReactionSource = reactionMgr.source
     (
-        label reactioni = 0;
-        reactioni < reactionMgr.nWaterEquilibriumReactions();
-        ++reactioni
-    )
-    {
-        const waterEquilibrium& waterEq =
-            reactionMgr.waterEquilibriumReaction(reactioni);
-
-        const volScalarField& cH =
-            mesh.lookupObject<volScalarField>
-            (
-                "c_" + waterEq.HplusName()
-            );
-
-        const volScalarField& cOH =
-            mesh.lookupObject<volScalarField>
-            (
-                "c_" + waterEq.OHminusName()
-            );
-
-        waterAPreclip[reactioni] = cH.primitiveField()- cOH.primitiveField();
-    }
-}
-
-// Apply all fast equilibrium projections only after all species transport solves.
-reactionMgr.applyEquilibriumReactions();
-
-const scalar invDeltaT = 1.0/runTime.deltaTValue();
-
-forAll(c, i)
-{
-    scalarField& ReqInternal = Req[i].primitiveFieldRef();
-
-    ReqInternal =
-        (c[i].primitiveField() - cBeforeEquilibrium[i])*invDeltaT;
-
-    // Equilibrium source bookkeeping is intentionally internal-cell only.
-    // Boundary changes caused by correctBoundaryConditions() belong to the
-    // boundary transport balance, not the volume equilibrium source.
-    forAll(Req[i].boundaryField(), patchi)
-    {
-        Req[i].boundaryFieldRef()[patchi] == 0.0;
-    }
-}
-
-// Positivity enforcement only AFTER equilibrium projection.
-forAll(c, i)
-{
-    if (i != inertIndex)
-    {
-        c[i].max(0.0);
-        c[i].correctBoundaryConditions();
-    }
-}
-
-if (pHActive)
-{
-    Info<< "pH fields:" << nl;
-
-    volScalarField& pH =
-        pHPtr();
-
-    const volScalarField& cHplus =
-        c[HplusIndex];
-
-    const dimensionedScalar standardConcentration
-    (
-        "standardConcentration",
-        cHplus.dimensions(),
-        1000.0
+        i,
+        captureReactionSplit ? &RcKinetic[i] : nullptr,
+        captureReactionSplit ? &RcEquilibrium[i] : nullptr
     );
 
-    const dimensionedScalar concentrationFloor
+    // Store the total reaction source for post-convergence diagnostics.
+    // Split snapshots use the same frozen kinetic rates and lambda as this solve.
+    Rc[i] = tReactionSource();
+
+    fvScalarMatrix ciEqn
     (
-        "concentrationFloor",
-        cHplus.dimensions(),
-        SMALL
+        fvm::ddt(ci)
+      + fvm::div(phi, ci)
+     ==
+        fvm::laplacian(Di, ci)
+      + fvc::div(migrationFlux)
+      + tReactionSource()
+      + fvOptions(ci)
     );
 
-    pH =
-        -log10
-        (
-            max(cHplus, concentrationFloor)
-           /standardConcentration
-        );
+    ciEqn.relax();
+    fvOptions.constrain(ciEqn);
 
-    pH.correctBoundaryConditions();
+    // S_i = V/aP_i must come from the final constrained transport matrix.
+    reactionMgr.setTransportResponse(i, ciEqn);
 
-    if (printPH)
+    dictionary transportControls(ciEqn.solverDict(ci.name()));
+    transportControls.set("log", reactionMgr.transportLogLevel());
+    const auto transportPerformance = ciEqn.solve(transportControls);
+    if (reactionMgr.equilibriumDiagnostics())
     {
-        Info<< "  pH min/mean/max:"
-            << gMin(pH)
-            << "/" << gAverage(pH)
-            << "/" << gMax(pH)
+        Pout<< "EQDIAG linearSolve species=" << species[i]
+            << " initialResidual=" << transportPerformance.initialResidual()
+            << " finalResidual=" << transportPerformance.finalResidual()
+            << " iterations=" << transportPerformance.nIterations()
+            << " converged=" << transportPerformance.converged() << nl;
+    }
+
+    fvOptions.correct(ci);
+    ci.correctBoundaryConditions();
+
+    // Inspect before clipping or the existing fatal negativity check.
+    reactionMgr.reportTransportDiagnostics(i);
+
+    if (printCFieldsBeforeClipping)
+    {
+        cPreMin[i] = gMin(ci.primitiveField());
+        cPreMean[i] = gSum(ci.primitiveField()*mesh.V())/gSum(mesh.V());
+        cPreMax[i] = gMax(ci.primitiveField());
+    }
+
+    const scalar minCi = gMin(c[i]);
+
+    if (minCi < -negativeConcentrationTolerance)
+    {
+        FatalErrorInFunction
+            << "Negative concentration after transport for "
+            << species[i] << ": min(c)=" << minCi << " mol/m3" << nl
+            << "negativeConcentrationTolerance="
+            << negativeConcentrationTolerance << " mol/m3" << nl
+            << "The undershoot exceeds the permitted numerical tolerance."
+            << exit(FatalError);
+    }
+
+    if (minCi < 0.0)
+    {
+        Info<< "Clipping numerical concentration undershoot for "
+            << species[i]
+            << ": min(c)=" << minCi << " mol/m3"
+            << " -> 0"
             << nl;
+
+        c[i].max(0.0);
     }
-    Info<< endl;
 }
+
+// No fast-equilibrium concentration projection is permitted here.
+// lambda corrections are calculated by reactionManager after this complete
+// transported state has been evaluated, and affect concentrations only through
+// the next cEqn solve.
 
