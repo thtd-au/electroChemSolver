@@ -10,6 +10,7 @@ class multiplicativeMonod : public reactionModel
 {
     labelList substrateIndices_;
     scalarList K_;
+    scalarList CThreshold_;
     scalar qMax_;
     scalar X_;
 
