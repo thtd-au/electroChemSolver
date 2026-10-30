@@ -90,6 +90,10 @@ class reactionManager
 
     List<scalarField> kineticRates_;       // [kinetic reaction][cell]
     List<scalarField> lambda_;             // [equilibrium reaction][cell]
+    List<scalarField> lastAcceptedLambda_; // Accepted physical-time state only
+    bool haveAcceptedEquilibriumSources_;
+    word equilibriumInitialGuess_;        // zero | lastAccepted
+    bool usingAcceptedEquilibriumGuess_;
     List<scalarField> transportResponse_;  // [species][cell], V/aP
     List<scalarField> residual_;           // [equilibrium reaction][cell]
     List<scalarField> residualScale_;      // [equilibrium reaction][cell]
@@ -150,6 +154,7 @@ class reactionManager
     label speciesIndex(const word& name, const dictionary& dict) const;
     void readReactions();
     void readEquilibriumControls();
+    void readEquilibriumInitialGuess(const dictionary& controls);
     void buildAndValidateEquilibriumStoichiometry();
     void validateStoichiometry
     (
@@ -180,7 +185,13 @@ public:
         const label inertIndex
     );
 
+    // Initialize a new timestep and invalidate all old acceptance flags.
     void resetEquilibriumSources();
+    // Called only after every electrochemical constraint has passed.
+    void acceptEquilibriumSources();
+    bool usingAcceptedEquilibriumGuess() const
+    { return usingAcceptedEquilibriumGuess_; }
+    void scaleInitialEquilibriumGuess(const scalar scale);
     void updateKineticRates();
 
     tmp<volScalarField> source

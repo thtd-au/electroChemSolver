@@ -177,7 +177,8 @@ int main(int argc, char *argv[])
                 << exit(FatalIOError);
         }
 
-        // Fast-equilibrium pseudo-sources are timestep-local iterative state.
+        // Initialize fast-equilibrium pseudo-sources from the selected guess.
+        // Only fully accepted states are eligible for lastAccepted history.
         // phiE is deliberately NOT reset: it starts from the previously
         // converged physical-time value read/retained by the solver.
         reactionMgr.readOutputControls();
@@ -208,9 +209,54 @@ int main(int argc, char *argv[])
             // One common kinetic state for the complete species sweep.
             reactionMgr.updateKineticRates();
 
-            // Transport all active species using the current lambda and phiE.
-            // cEqn also supplies S_i = V/aP_i to reactionMgr.
-            #include "cEqn.H"
+            // A retained lambda is only an initial guess. Its first complete
+            // transport must be feasible before any constraints are evaluated.
+            const bool safeguardInitialGuess = picardI == 0
+                && reactionMgr.usingAcceptedEquilibriumGuess();
+            PtrList<volScalarField> transportStart
+                (safeguardInitialGuess ? c.size() : 0);
+            forAll(transportStart, i)
+                transportStart.set
+                (
+                    i,
+                    new volScalarField
+                    (
+                        IOobject(c[i].name(), runTime.timeName(), mesh,
+                            IOobject::NO_READ, IOobject::NO_WRITE, false),
+                        c[i]
+                    )
+                );
+
+            scalar initialGuessScale = 1.0;
+            label initialGuessBacktracks = 0;
+            for (;;)
+            {
+                const bool permitInitialGuessRetry = safeguardInitialGuess
+                    && initialGuessScale > 0;
+                bool transportGuessRejected = false;
+
+                // cEqn also supplies S_i = V/aP_i to reactionMgr. Current,
+                // potential and kinetic rates stay frozen across retries.
+                #include "cEqn.H"
+                if (!transportGuessRejected) break;
+
+                // Roll back EVERY species, including boundary values. Keep
+                // physical oldTime fields intact; this is not a new timestep.
+                forAll(transportStart, i)
+                {
+                    c[i].primitiveFieldRef() = transportStart[i].primitiveField();
+                    forAll(c[i].boundaryField(), patchi)
+                        c[i].boundaryFieldRef()[patchi]
+                            == transportStart[i].boundaryField()[patchi];
+                }
+                // At most eight halvings, then retry the original zero guess.
+                // If zero also fails, cEqn retains its original fatal check.
+                initialGuessScale = ++initialGuessBacktracks <= 8
+                    ? scalar(0.5)*initialGuessScale : scalar(0);
+                reactionMgr.scaleInitialEquilibriumGuess(initialGuessScale);
+                Info<< "    Retrying initial transport with lambda = "
+                    << initialGuessScale << " * lastAccepted" << nl;
+            }
 
             // Both constraints are evaluated on this SAME transported state.
             reactionMgr.evaluateEquilibrium();
@@ -244,6 +290,7 @@ int main(int argc, char *argv[])
 
             if (constraintsOK)
             {
+                reactionMgr.acceptEquilibriumSources();
                 electroChemConverged = true;
                 break;
             }

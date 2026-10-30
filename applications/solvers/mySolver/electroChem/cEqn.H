@@ -121,6 +121,13 @@ forAll(c, i)
 
     if (minCi < -negativeConcentrationTolerance)
     {
+        if (permitInitialGuessRetry)
+        {
+            Info<< "    Rejecting initial equilibrium guess: "
+                << species[i] << " min(c)=" << minCi << " mol/m3" << nl;
+            transportGuessRejected = true;
+            break; // Caller restores all species and reduces the lambda guess.
+        }
         FatalErrorInFunction
             << "Negative concentration after transport for "
             << species[i] << ": min(c)=" << minCi << " mol/m3" << nl

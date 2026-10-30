@@ -195,6 +195,8 @@ reactionManager::reactionManager
     mesh_(mesh), reactionsDict_(reactionsDict), species_(species), c_(c),
     inertIndex_(inertIndex), reactions_(), kineticReactionIndices_(),
     equilibriumReactionIndices_(), kineticRates_(), lambda_(),
+    lastAcceptedLambda_(), haveAcceptedEquilibriumSources_(false),
+    equilibriumInitialGuess_("zero"), usingAcceptedEquilibriumGuess_(false),
     transportResponse_(), residual_(), residualScale_(),
     equilibriumAbsTol_(), equilibriumRelTol_(), equilibriumRelaxation_(1.0),
     equilibriumFBL_(false), equilibriumFractionToBoundary_(0.99),
@@ -354,6 +356,7 @@ void reactionManager::readEquilibriumControls()
             << exit(FatalIOError);
     }
     const dictionary& eqControls = picard.subDict("equilibrium");
+    readEquilibriumInitialGuess(eqControls);
     if (eqControls.found("response") || eqControls.found("diagnostics"))
         FatalIOErrorInFunction(eqControls)
             << "Remove response and diagnostics: coupled Newton is mandatory. "
@@ -594,13 +597,102 @@ void reactionManager::buildAndValidateEquilibriumStoichiometry()
 }
 
 
+void reactionManager::readEquilibriumInitialGuess(const dictionary& controls)
+{
+    // Accept the spelling from the original case example as an alias.
+    if (controls.found("initialGuess") && controls.found("initialGues"))
+        FatalIOErrorInFunction(controls)
+            << "Specify only initialGuess (or its initialGues alias), not both"
+            << exit(FatalIOError);
+
+    equilibriumInitialGuess_ = "zero";
+    const word key = controls.found("initialGuess")
+        ? word("initialGuess") : word("initialGues");
+    if (!controls.found(key)) return;
+
+    ITstream& stream = controls.lookup(key);
+    const token value(stream);
+    if (value.isNumber() && value.number() == 0)
+        equilibriumInitialGuess_ = "zero";
+    else if (value.isWord() && value.wordToken() == "zero")
+        equilibriumInitialGuess_ = "zero";
+    else if (value.isWord()
+         && (value.wordToken() == "lastAccepted"
+          || value.wordToken() == "lastaccepted"
+          || value.wordToken() == "Previous"))
+        equilibriumInitialGuess_ = "lastAccepted";
+    else
+        FatalIOErrorInFunction(controls)
+            << "equilibrium initialGuess must be zero or lastAccepted "
+            << "(aliases: 0 or Previous)" << exit(FatalIOError);
+
+    if (!stream.eof())
+        FatalIOErrorInFunction(controls)
+            << "equilibrium initialGuess must contain exactly one value"
+            << exit(FatalIOError);
+}
+
+
 void reactionManager::resetEquilibriumSources()
 {
+    usingAcceptedEquilibriumGuess_ = false;
     diagnosticStepValid_ = false;
-    if (!nEquilibriumReactions()) return;
-    forAll(lambda_, r) lambda_[r] = 0.0;
     equilibriumEvaluated_ = false;
     equilibriumConverged_ = false;
+    if (!nEquilibriumReactions()) return;
+
+    // These cell arrays have no topology mapper. Never reuse stale history
+    // after a topology change, even if the cell count happened to stay equal.
+    bool historyValid = haveAcceptedEquilibriumSources_
+        && !mesh_.topoChanging()
+        && lastAcceptedLambda_.size() == lambda_.size();
+    if (historyValid)
+        forAll(lastAcceptedLambda_, r)
+            historyValid = historyValid
+                && lastAcceptedLambda_[r].size() == mesh_.nCells();
+    reduce(historyValid, andOp<bool>());
+    if (!historyValid) haveAcceptedEquilibriumSources_ = false;
+
+    const bool useAccepted = equilibriumInitialGuess_ == "lastAccepted"
+        && historyValid;
+    usingAcceptedEquilibriumGuess_ = useAccepted;
+    forAll(lambda_, r)
+    {
+        if (useAccepted) lambda_[r] = lastAcceptedLambda_[r];
+        else lambda_[r] = 0.0;
+    }
+    if (outputLevel_ > 0)
+        Info<< "    Equilibrium initialGuess: " << equilibriumInitialGuess_
+            << ", using " << (useAccepted ? "last accepted sources" : "zero sources")
+            << nl;
+}
+
+
+void reactionManager::scaleInitialEquilibriumGuess(const scalar scale)
+{
+    // Backtracking changes working state only, never the accepted snapshot.
+    if (!usingAcceptedEquilibriumGuess_ || equilibriumEvaluated_
+     || !std::isfinite(scale) || scale < 0 || scale > 1)
+        FatalErrorInFunction
+            << "Initial equilibrium guess scaling requires an untested "
+            << "lastAccepted guess and 0 <= scale <= 1" << exit(FatalError);
+    forAll(lambda_, r)
+    {
+        if (scale == 0) lambda_[r] = 0.0;
+        else lambda_[r] = scale*lastAcceptedLambda_[r];
+    }
+}
+
+
+void reactionManager::acceptEquilibriumSources()
+{
+    if (!nEquilibriumReactions()) return;
+    if (!equilibriumEvaluated_ || !equilibriumConverged_)
+        FatalErrorInFunction
+            << "Cannot accept equilibrium sources before equilibrium convergence"
+            << exit(FatalError);
+    lastAcceptedLambda_ = lambda_;
+    haveAcceptedEquilibriumSources_ = true;
 }
 
 
