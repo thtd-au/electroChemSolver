@@ -10,6 +10,8 @@
 #include "reactionManager.H"
 #include "potentialManager.H"
 #include "currentManager.H"
+#include "OSspecific.H"
+#include <fstream>
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -410,6 +412,40 @@ int main(int argc, char *argv[])
         #include "diagnostics.H"
 
         runTime.write();
+
+        // Optional accepted-state statistics at the normal field-write times.
+        // Use the global case path and master rank only, including in parallel.
+        if (Pstream::master() && runTime.writeTime()
+         && runTime.controlDict().getOrDefault<Switch>("picardLog", false))
+        {
+            const fileName picardDir
+                (runTime.globalPath()/"postProcessing"/"picard");
+            mkDir(picardDir);
+            const fileName picardPath(picardDir/"picard.dat");
+            // Append across restarts/toggle changes; header only for empty files.
+            std::ifstream existing(picardPath.c_str());
+            const bool writeHeader =
+                existing.peek() == std::ifstream::traits_type::eof();
+            existing.close();
+            std::ofstream picardData(picardPath.c_str(), std::ios::app);
+            if (!picardData)
+                FatalErrorInFunction << "Cannot open Picard log "
+                    << picardPath << exit(FatalError);
+            if (writeHeader)
+                picardData << "# time totalPicardIter EqPicardIter "
+                    << "ENPicardIter BVPicardIter\n";
+            // Match the summary: first sweep in the final uninterrupted passing
+            // sequence. Inactive constraints use zero. Retry solves are excluded.
+            picardData << runTime.value() << ' ' << testedPicardStates << ' '
+                << (reactionMgr.nEquilibriumReactions() ? equilibriumLastFailed + 1 : 0)
+                << ' ' << (potentialMgr.active() ? electroneutralityLastFailed + 1 : 0)
+                << ' ' << (currentMgr.requiresPotentialCoupling() ? currentLastFailed + 1 : 0)
+                << '\n';
+            picardData.flush();
+            if (!picardData)
+                FatalErrorInFunction << "Cannot write Picard log "
+                    << picardPath << exit(FatalError);
+        }
 
         runTime.printExecutionTime(Info);
     }
