@@ -432,15 +432,16 @@ int main(int argc, char *argv[])
                 FatalErrorInFunction << "Cannot open Picard log "
                     << picardPath << exit(FatalError);
             if (writeHeader)
-                picardData << "# time totalPicardIter EqPicardIter "
-                    << "ENPicardIter BVPicardIter\n";
+                picardData << "# time EqPicardIter ENPicardIter "
+                    << "BVPicardIter totalPicardIter runTime\n";
             // Match the summary: first sweep in the final uninterrupted passing
             // sequence. Inactive constraints use zero. Retry solves are excluded.
-            picardData << runTime.value() << ' ' << testedPicardStates << ' '
+            picardData << runTime.value() << ' '
                 << (reactionMgr.nEquilibriumReactions() ? equilibriumLastFailed + 1 : 0)
                 << ' ' << (potentialMgr.active() ? electroneutralityLastFailed + 1 : 0)
                 << ' ' << (currentMgr.requiresPotentialCoupling() ? currentLastFailed + 1 : 0)
-                << '\n';
+                << ' ' << testedPicardStates
+                << ' ' << runTime.elapsedCpuTime() << '\n';
             picardData.flush();
             if (!picardData)
                 FatalErrorInFunction << "Cannot write Picard log "
