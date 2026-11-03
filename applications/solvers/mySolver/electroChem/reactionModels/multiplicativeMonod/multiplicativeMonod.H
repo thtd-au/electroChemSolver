@@ -8,10 +8,13 @@ namespace Foam
 
 class multiplicativeMonod : public reactionModel
 {
+    enum formType { firstOrder, monod };
+
     labelList substrateIndices_;
+    List<formType> forms_;
     scalarList K_;
-    scalarList CThreshold_;
-    scalar qMax_;
+    scalarList cThreshold_;
+    scalar value_; // qMax or k1, selected and dimensionally validated at startup
     scalar X_;
 
 public:

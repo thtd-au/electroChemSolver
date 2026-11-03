@@ -17,77 +17,132 @@ multiplicativeMonod::multiplicativeMonod
 :
     reactionModel(name),
     substrateIndices_(),
-    K_(dict.lookup("K")),
-    CThreshold_(),
-    qMax_(dict.get<scalar>("qMax")),
+    forms_(),
+    K_(),
+    cThreshold_(),
+    value_(dict.get<scalar>("value")),
     X_(dict.get<scalar>("X"))
 {
-    const wordList substrates(dict.lookup("substrates"));
-
-    if (dict.found("C_threshold"))
-    {
-        CThreshold_ = scalarList(dict.lookup("C_threshold"));
-    }
-    else
-    {
-        CThreshold_.setSize(substrates.size(), 0.0);
-    }
-
-    if (substrates.empty())
-    {
-        FatalIOErrorInFunction(dict)
-            << "Reaction " << name_ << " requires at least one substrate"
-            << exit(FatalIOError);
-    }
-
-    if (K_.size() != substrates.size())
-    {
-        FatalIOErrorInFunction(dict)
-            << "Reaction " << name_ << ": substrates and K must have "
-            << "the same length"
-            << exit(FatalIOError);
-    }
-
-    if (qMax_ < 0 || X_ < 0)
-    {
-        FatalIOErrorInFunction(dict)
-            << "Reaction " << name_ << ": qMax and X must be non-negative"
-            << exit(FatalIOError);
-    }
-
-    if (CThreshold_.size() != substrates.size())
+    // Reject the old list-based syntax rather than silently ignoring it.
+    if
+    (
+        dict.found("qMax") || dict.found("k1")
+     || dict.found("substrates") || dict.found("K")
+     || dict.found("C_threshold") || dict.found("c_threshold")
+    )
     {
         FatalIOErrorInFunction(dict)
             << "Reaction " << name_
-            << ": substrates and C_threshold must have the same length"
+            << ": use rateBasis/value and per-species form, K and c_threshold "
+            << "entries in the species dictionary; old top-level kinetic "
+            << "entries are not supported" << exit(FatalIOError);
+    }
+
+    const word rateBasis(dict.get<word>("rateBasis"));
+    if (rateBasis != "maximumSpecificRate" && rateBasis != "firstOrderRateConstant")
+    {
+        FatalIOErrorInFunction(dict)
+            << "Reaction " << name_ << ": unknown rateBasis " << rateBasis
+            << "; expected maximumSpecificRate or firstOrderRateConstant"
+            << exit(FatalIOError);
+    }
+
+    if (!std::isfinite(value_) || value_ < 0 || !std::isfinite(X_) || X_ < 0)
+    {
+        FatalIOErrorInFunction(dict)
+            << "Reaction " << name_ << ": value and X must be finite "
+            << "and non-negative" << exit(FatalIOError);
+    }
+
+    const dictionary& speciesDict = dict.subDict("species");
+    const wordList substrates(speciesDict.toc());
+    if (substrates.empty())
+    {
+        FatalIOErrorInFunction(speciesDict)
+            << "Reaction " << name_ << " requires at least one species term"
             << exit(FatalIOError);
     }
 
     substrateIndices_.setSize(substrates.size());
+    forms_.setSize(substrates.size());
+    K_.setSize(substrates.size(), 0.0);
+    cThreshold_.setSize(substrates.size(), 0.0);
+    label nFirstOrder = 0;
 
     forAll(substrates, i)
     {
-        const label speciesI = species.find(substrates[i]);
+        const word& substrate = substrates[i];
+        const label speciesI = species.find(substrate);
         if (speciesI < 0)
         {
-            FatalIOErrorInFunction(dict)
-                << "Reaction " << name_ << " has unknown substrate "
-                << substrates[i] << exit(FatalIOError);
-        }
-        if (K_[i] <= 0)
-        {
-            FatalIOErrorInFunction(dict)
-                << "Reaction " << name_ << ": K[" << i
-                << "] must be positive" << exit(FatalIOError);
+            FatalIOErrorInFunction(speciesDict)
+                << "Reaction " << name_ << " has unknown species "
+                << substrate << exit(FatalIOError);
         }
         substrateIndices_[i] = speciesI;
-        if (!std::isfinite(CThreshold_[i]) || CThreshold_[i] < 0)
+
+        const dictionary& term = speciesDict.subDict(substrate);
+        const word form(term.get<word>("form"));
+        if (form == "firstOrder")
         {
-            FatalIOErrorInFunction(dict)
-                << "Reaction " << name_ << ": C_threshold[" << i
-                << "] must be finite and non-negative (mol/m3)"
+            forms_[i] = firstOrder;
+            ++nFirstOrder;
+            if (term.found("K"))
+            {
+                FatalIOErrorInFunction(term)
+                    << "Reaction " << name_ << ", species " << substrate
+                    << ": K is only allowed for form monod"
+                    << exit(FatalIOError);
+            }
+        }
+        else if (form == "monod")
+        {
+            forms_[i] = monod;
+            K_[i] = term.get<scalar>("K");
+            if (!std::isfinite(K_[i]) || K_[i] <= 0)
+            {
+                FatalIOErrorInFunction(term)
+                    << "Reaction " << name_ << ", species " << substrate
+                    << ": K must be finite and positive (mol/m3)"
+                    << exit(FatalIOError);
+            }
+        }
+        else
+        {
+            FatalIOErrorInFunction(term)
+                << "Reaction " << name_ << ", species " << substrate
+                << ": unknown form " << form << "; expected firstOrder or monod"
                 << exit(FatalIOError);
         }
+
+        if (term.found("C_threshold"))
+        {
+            FatalIOErrorInFunction(term)
+                << "Reaction " << name_ << ", species " << substrate
+                << ": use lowercase c_threshold instead of C_threshold"
+                << exit(FatalIOError);
+        }
+        cThreshold_[i] = term.lookupOrDefault<scalar>("c_threshold", 0.0);
+        if (!std::isfinite(cThreshold_[i]) || cThreshold_[i] < 0)
+        {
+            FatalIOErrorInFunction(term)
+                << "Reaction " << name_ << ", species " << substrate
+                << ": c_threshold must be finite and non-negative (mol/m3)"
+                << exit(FatalIOError);
+        }
+    }
+
+    // X*value has units mol/(m3 s) for qMax, or 1/s for k1.
+    // Hence qMax permits no dimensional factors, and k1 requires exactly one.
+    const label expectedFirstOrder = rateBasis == "firstOrderRateConstant" ? 1 : 0;
+    if (nFirstOrder != expectedFirstOrder)
+    {
+        FatalIOErrorInFunction(dict)
+            << "Reaction " << name_ << ": rateBasis " << rateBasis
+            << " requires " << expectedFirstOrder << " firstOrder species term(s), "
+            << "but found " << nFirstOrder
+            << ". All remaining species terms must use form monod."
+            << exit(FatalIOError);
     }
 }
 
@@ -98,20 +153,26 @@ scalar multiplicativeMonod::kineticRate
     const scalarField&
 ) const
 {
-    scalar rate = qMax_*X_;
+    scalar rate = value_*X_;
 
     forAll(substrateIndices_, i)
     {
         const scalar ci = concentrations[substrateIndices_[i]];
-
-        if (ci <= CThreshold_[i])
+        if (ci <= cThreshold_[i])
         {
             return 0.0;
         }
 
-        // Requested law: max(0, ci-C_threshold)/(ci+K).
-        // The denominator uses ci, not the threshold-shifted concentration.
-        rate *= (ci - CThreshold_[i])/(K_[i] + ci);
+        const scalar available = ci - cThreshold_[i];
+        if (forms_[i] == firstOrder)
+        {
+            rate *= available;
+        }
+        else
+        {
+            // The denominator uses the unshifted concentration.
+            rate *= available/(ci + K_[i]);
+        }
     }
 
     return rate;
