@@ -16,6 +16,8 @@ class multiplicativeMonod : public reactionModel
     scalarList cThreshold_;
     scalar value_; // qMax or k1, selected and dimensionally validated at startup
     scalar X_;
+    scalar Xfilm_;
+    const scalarField* filmIndicator_;
 
 public:
     TypeName("multiplicativeMonod");
@@ -28,6 +30,8 @@ public:
     );
 
     categoryType category() const override { return kinetic; }
+    void setBiofilmIndicator(const scalarField* indicator) override
+    { filmIndicator_ = indicator; }
 
     scalar kineticRate
     (

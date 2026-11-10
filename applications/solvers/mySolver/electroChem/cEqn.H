@@ -1,6 +1,5 @@
 // cEqn.H -- PotentialReaction reactive Nernst-Planck transport
 
-const dictionary& diffusivityDict = reactions.subDict("diffusivity");
 const bool hasChargeNumber = reactions.found("chargeNumber");
 
 surfaceScalarField gradPhiEFlux
@@ -36,12 +35,7 @@ forAll(c, i)
 
     volScalarField& ci = c[i];
 
-    dimensionedScalar Di
-    (
-        "D_" + species[i],
-        dimArea/dimTime,
-        diffusivityDict.get<scalar>(species[i])
-    );
+    const volScalarField& Di = effectiveDiffusivities[i];
 
     scalar zi = 0.0;
     if (hasChargeNumber)

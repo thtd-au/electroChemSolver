@@ -619,6 +619,87 @@ forAll(c, i)
 // Reaction chemistry is constructed only after all concentration fields exist.
 // reactionManager owns reaction definitions/stoichiometry/model instances, while
 // the physical concentration fields remain owned by createFields/the solver.
+// Shared, registered effective properties. Construct before reaction/current/potential managers.
+// No explicit porosity: coefficients and biomass are per total cell volume.
+const word biofilmIndicatorName("biofilmIndicator");
+volScalarField biofilmIndicator
+(
+    IOobject(biofilmIndicatorName, runTime.timeName(), mesh,
+        IOobject::NO_READ, IOobject::NO_WRITE),
+    mesh, dimensionedScalar("zero", dimless, 0.0)
+);
+
+IOdictionary biofilmProperties
+(
+    IOobject("biofilmProperties", runTime.constant(), mesh,
+        IOobject::READ_IF_PRESENT, IOobject::NO_WRITE)
+);
+const dictionary* filmDict = biofilmProperties.found("biofilm")
+    ? &biofilmProperties.subDict("biofilm") : nullptr;
+const bool biofilmActive = filmDict
+    && filmDict->getOrDefault<Switch>("active", false);
+const dictionary* filmDiffDict = nullptr;
+scalar filmScaling = 1.0;
+if (biofilmActive)
+{
+    const word zoneName(filmDict->get<word>("cellZone"));
+    const label zonei = mesh.cellZones().findZoneID(zoneName);
+    if (zonei < 0)
+    {
+        FatalErrorInFunction << "Biofilm cellZone '" << zoneName
+            << "' not found; run topoSet before starting/decomposing"
+            << exit(FatalError);
+    }
+    const labelList& cells = mesh.cellZones()[zonei];
+    forAll(cells, i) biofilmIndicator[cells[i]] = 1.0;
+    filmDiffDict = &filmDict->subDict("diffusivity");
+    filmScaling = filmDiffDict->getOrDefault<scalar>("scalingFactor", 1.0);
+    if (!std::isfinite(filmScaling) || filmScaling <= 0)
+    {
+        FatalIOErrorInFunction(*filmDiffDict)
+            << "scalingFactor must be finite and positive" << exit(FatalIOError);
+    }
+    Info<< "Biofilm: zone=" << zoneName << " localCells=" << cells.size() << nl;
+}
+PtrList<volScalarField> effectiveDiffusivities(species.size());
+const dictionary& bulkDiffDict = reactions.subDict("diffusivity");
+forAll(species, i)
+{
+    const scalar bulk = bulkDiffDict.get<scalar>(species[i]);
+    scalar film = bulk*filmScaling;
+    if (biofilmActive && filmDiffDict->found("species"))
+    {
+        const dictionary& overrides = filmDiffDict->subDict("species");
+        film = overrides.getOrDefault<scalar>(species[i], film);
+    }
+    if (!std::isfinite(bulk) || bulk <= 0 || !std::isfinite(film) || film <= 0)
+    {
+        FatalErrorInFunction << "Invalid diffusivity for " << species[i]
+            << ": bulk=" << bulk << " film=" << film << exit(FatalError);
+    }
+    effectiveDiffusivities.set(i, new volScalarField
+    (
+        IOobject("D_eff_" + species[i], runTime.timeName(), mesh,
+            IOobject::NO_READ, IOobject::NO_WRITE),
+        mesh, dimensionedScalar("D", dimArea/dimTime, bulk)
+    ));
+    volScalarField& D = effectiveDiffusivities[i];
+    if (biofilmActive)
+    {
+        forAll(D, celli)
+            if (biofilmIndicator[celli] > 0.5) D[celli] = film;
+        // Physical boundary faces inherit their adjacent cell diffusivity.
+        forAll(D.boundaryField(), patchi)
+        {
+            fvPatchScalarField& dp = D.boundaryFieldRef()[patchi];
+            const labelUList& faceCells = mesh.boundary()[patchi].faceCells();
+            forAll(dp, facei) dp[facei] = D[faceCells[facei]];
+        }
+    }
+    Info<< "Effective diffusivity " << species[i]
+        << ": bulk=" << bulk << " film=" << (biofilmActive ? film : bulk) << nl;
+}
+
 reactionManager reactionMgr(mesh, reactions, species, c, inertIndex);
 
 // Initial species inventories used by conservation diagnostics.

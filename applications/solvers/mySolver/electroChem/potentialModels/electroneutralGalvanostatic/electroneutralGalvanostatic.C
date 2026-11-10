@@ -192,12 +192,8 @@ void electroneutralGalvanostatic::updateCurrentFields()
             continue;
         }
 
-        const dimensionedScalar Di
-        (
-            "D_" + species_[i],
-            dimensionSet(0, 2, -1, 0, 0, 0, 0),
-            D_[i]
-        );
+        const volScalarField& Di =
+            mesh_.lookupObject<volScalarField>("D_eff_" + species_[i]);
 
         // Full-field algebra is intentional here.  This routine is called only
         // after the species transport step, whose electrode BCs have already
@@ -223,13 +219,10 @@ void electroneutralGalvanostatic::updateCurrentFields()
     forAll(c_, i)
     {
         if (mag(z_[i]) <= SMALL) continue;
-        const dimensionedScalar Di
-        (
-            "D_" + species_[i],
-            dimensionSet(0, 2, -1, 0, 0, 0, 0), D_[i]
-        );
+        const volScalarField& Di =
+            mesh_.lookupObject<volScalarField>("D_eff_" + species_[i]);
         jDiffSpeciesFaces -=
-            F_*z_[i]*Di*fvc::snGrad(c_[i])*mesh_.magSf();
+            F_*z_[i]*fvc::interpolate(Di)*fvc::snGrad(c_[i])*mesh_.magSf();
     }
     jDiffFlux_() = jDiffSpeciesFaces;
 

@@ -59,3 +59,4 @@ void zeroCurrentPotentialFlux::write(Ostream& os) const
     fixedGradientFvPatchScalarField::write(os);
 }
 }
+

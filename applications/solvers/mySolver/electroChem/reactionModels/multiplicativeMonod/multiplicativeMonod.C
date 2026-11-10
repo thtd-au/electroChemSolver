@@ -21,8 +21,16 @@ multiplicativeMonod::multiplicativeMonod
     K_(),
     cThreshold_(),
     value_(dict.get<scalar>("value")),
-    X_(dict.get<scalar>("X"))
+    X_(dict.found("biomass") ? dict.subDict("biomass").get<scalar>("planktonic")
+                              : dict.get<scalar>("X")),
+    Xfilm_(dict.found("biomass") ? dict.subDict("biomass").get<scalar>("biofilm") : X_),
+    filmIndicator_(nullptr)
 {
+    if (dict.found("biomass") && dict.found("X"))
+    {
+        FatalIOErrorInFunction(dict)
+            << "Specify either X or biomass, not both" << exit(FatalIOError);
+    }
     // Reject the old list-based syntax rather than silently ignoring it.
     if
     (
@@ -47,7 +55,7 @@ multiplicativeMonod::multiplicativeMonod
             << exit(FatalIOError);
     }
 
-    if (!std::isfinite(value_) || value_ < 0 || !std::isfinite(X_) || X_ < 0)
+    if (!std::isfinite(value_) || value_ < 0 || !std::isfinite(X_) || X_ < 0 || !std::isfinite(Xfilm_) || Xfilm_ < 0)
     {
         FatalIOErrorInFunction(dict)
             << "Reaction " << name_ << ": value and X must be finite "
@@ -148,12 +156,14 @@ multiplicativeMonod::multiplicativeMonod
 
 scalar multiplicativeMonod::kineticRate
 (
-    const label,
+    const label celli,
     const scalarField& concentrations,
     const scalarField&
 ) const
 {
-    scalar rate = value_*X_;
+    const scalar localX = filmIndicator_ && (*filmIndicator_)[celli] > 0.5
+        ? Xfilm_ : X_;
+    scalar rate = value_*localX;
 
     forAll(substrateIndices_, i)
     {

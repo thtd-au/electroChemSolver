@@ -310,7 +310,10 @@ scalar concentrationButlerVolmer::adjustCurrentCandidate
                 }
                 dcDj[m][f]=electroChemConcentration::boundaryCurrentResponse
                 (
-                    speciesNu_[e][m],nuE_[e],F_,diffusivity_[e][m],delta[f],beta
+                    speciesNu_[e][m],nuE_[e],F_,
+                    mesh_.lookupObject<volScalarField>
+                    ("D_eff_" + dependencyNames_[e][m]).boundaryField()[patchi][f],
+                    delta[f],beta
                 );
                 // Account for the known change in gradient since the last
                 // species sweep: stored face values need not satisfy the new BC.

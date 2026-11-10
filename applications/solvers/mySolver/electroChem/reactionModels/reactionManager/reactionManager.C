@@ -317,7 +317,26 @@ void reactionManager::readReactions()
         record.name = reactionName;
         record.type = reactionDict.get<word>("type");
         validateStoichiometry(reactionName, reactionDict, record);
+        if (reactionDict.found("biomass"))
+        {
+            const IOdictionary& filmProps =
+                mesh_.lookupObject<IOdictionary>("biofilmProperties");
+            if (!filmProps.found("biofilm")
+             || !filmProps.subDict("biofilm").getOrDefault<Switch>("active", false))
+            {
+                FatalIOErrorInFunction(reactionDict)
+                    << "Reaction " << reactionName
+                    << " specifies separate planktonic/biofilm biomass, "
+                    << "but biofilm.active is not true" << exit(FatalIOError);
+            }
+        }
         record.model = reactionModel::New(record.type, reactionName, reactionDict, species_);
+        if (mesh_.foundObject<volScalarField>("biofilmIndicator"))
+        {
+            const volScalarField& indicator =
+                mesh_.lookupObject<volScalarField>("biofilmIndicator");
+            record.model->setBiofilmIndicator(&indicator.primitiveField());
+        }
 
         if (record.model->category() == reactionModel::kinetic) kineticIds.append(reactionI);
         else equilibriumIds.append(reactionI);

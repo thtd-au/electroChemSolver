@@ -46,6 +46,8 @@ public:
     const word& name() const { return name_; }
     virtual categoryType category() const = 0;
 
+    virtual void setBiofilmIndicator(const scalarField*) {}
+
     virtual scalar kineticRate
     (
         const label celli,

@@ -40,7 +40,6 @@
         }
     }
 
-    const dictionary& diffusivityDict = reactions.subDict("diffusivity");
     const bool hasChargeNumber = reactions.found("chargeNumber");
 
     const dictionary* zDictPtr = nullptr;
@@ -329,12 +328,7 @@
 
             const volScalarField& ci = c[i];
 
-            dimensionedScalar Di
-            (
-                "D_" + specieName,
-                dimArea/dimTime,
-                diffusivityDict.get<scalar>(specieName)
-            );
+            const volScalarField& Di = effectiveDiffusivities[i];
 
             scalar zi = 0.0;
 
@@ -493,12 +487,7 @@
             const word& specieName = species[i];
             const volScalarField& ci = c[i];
 
-            dimensionedScalar Di
-            (
-                "D_" + specieName,
-                dimArea/dimTime,
-                diffusivityDict.get<scalar>(specieName)
-            );
+            const volScalarField& Di = effectiveDiffusivities[i];
 
             scalar zi = 0.0;
 
@@ -554,12 +543,12 @@
                         cp[facei]*phip[facei];
 
                     diffOutRate +=
-                       -Di.value()
+                       -Di.boundaryField()[patchi][facei]
                        *snGradCp[facei]
                        *magSfp[facei];
 
                     migOutRate +=
-                       -Di.value()
+                       -Di.boundaryField()[patchi][facei]
                        *zi
                        *Fdim.value()
                        /(Rgas.value()*T.value())

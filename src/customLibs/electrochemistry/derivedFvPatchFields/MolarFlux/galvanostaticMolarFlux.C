@@ -164,24 +164,10 @@ void galvanostaticMolarFlux::updateCoeffs()
             << exit(FatalIOError);
     }
 
-    const dictionary& diffusivityDict = reactions.subDict("diffusivity");
+    const volScalarField& effectiveD =
+        mesh.lookupObject<volScalarField>("D_eff_" + speciesName_);
+    const scalarField& localD = effectiveD.boundaryField()[patch().index()];
 
-    if (!diffusivityDict.found(speciesName_))
-    {
-        FatalIOErrorInFunction(reactions)
-            << "No diffusivity entry for species " << speciesName_
-            << exit(FatalIOError);
-    }
-
-    const scalar Di = diffusivityDict.get<scalar>(speciesName_);
-
-    if (Di <= SMALL)
-    {
-        FatalIOErrorInFunction(reactions)
-            << "Diffusivity for species " << speciesName_
-            << " must be positive"
-            << exit(FatalIOError);
-    }
 
     scalar zi = 0.0;
 
@@ -256,7 +242,7 @@ void galvanostaticMolarFlux::updateCoeffs()
     forAll(A, facei)
     {
         A[facei] = -speciesStoichCoeff_*jnApplied[facei]
-            /(electronStoichCoeff*F*Di);
+            /(electronStoichCoeff*F*localD[facei]);
     }
 
     scalarField denominator(delta + beta);
