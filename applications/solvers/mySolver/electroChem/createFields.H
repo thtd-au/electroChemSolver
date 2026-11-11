@@ -661,6 +661,22 @@ if (biofilmActive)
     }
     Info<< "Biofilm: zone=" << zoneName << " localCells=" << cells.size() << nl;
 }
+// Optional one-time ParaView output of the stationary biofilm cell-zone mask.
+// Kept in createFields.H so electroChem.C remains unchanged.  NO_WRITE above
+// prevents this field from being written at every regular output interval.
+const bool writeBiofilmIndicator =
+    controlDict.found("biofilm")
+    && controlDict.subDict("biofilm").getOrDefault<Switch>
+    (
+        "writeIndicator", false
+    );
+
+if (writeBiofilmIndicator && runTime.value() == 0.0)
+{
+    Info<< "Writing stationary biofilmIndicator at time 0" << nl;
+    biofilmIndicator.write();
+}
+
 PtrList<volScalarField> effectiveDiffusivities(species.size());
 const dictionary& bulkDiffDict = reactions.subDict("diffusivity");
 forAll(species, i)
