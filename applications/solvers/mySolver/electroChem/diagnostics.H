@@ -732,52 +732,21 @@ if (diagDebyeActive)
         }
     }
 
-    vector directionVector(vector::zero);
-    directionVector[diagDebyeDirection] = 1.0;
-
-    scalarField directionalProjectedArea
-    (
-        mesh.nCells(),
-        0.0
-    );
+    // Direction-independent estimate of the smallest cell dimension.
+    // For an orthogonal hexahedral cell, V/max(faceArea) is the
+    // smallest edge length, including the electrode-normal spacing.
+    scalarField maxFaceArea(mesh.nCells(), 0.0);
 
     forAll(mesh.Sf(), facei)
     {
-        const scalar projectedArea =
-            mag(mesh.Sf()[facei] & directionVector);
-
-        const label owner =
-            mesh.faceOwner()[facei];
-
-        directionalProjectedArea[owner] +=
-            projectedArea;
+        const scalar faceArea = mag(mesh.Sf()[facei]);
+        const label owner = mesh.faceOwner()[facei];
+        maxFaceArea[owner] = max(maxFaceArea[owner], faceArea);
 
         if (facei < mesh.nInternalFaces())
         {
-            const label neighbour =
-                mesh.faceNeighbour()[facei];
-
-            directionalProjectedArea[neighbour] +=
-                projectedArea;
-        }
-    }
-
-    scalarField directionalCellLength
-    (
-        mesh.nCells(),
-        GREAT
-    );
-
-    forAll(directionalCellLength, celli)
-    {
-        // For an orthogonal structured cell, opposite faces both
-        // contribute to projectedArea, so divide their sum by two.
-        const scalar meanDirectionalFaceArea =
-            0.5*directionalProjectedArea[celli];
-
-        if (meanDirectionalFaceArea > SMALL)
-        {
-            directionalCellLength[celli] = mesh.V()[celli]/meanDirectionalFaceArea;
+            const label neighbour = mesh.faceNeighbour()[facei];
+            maxFaceArea[neighbour] = max(maxFaceArea[neighbour], faceArea);
         }
     }
 
@@ -789,12 +758,12 @@ if (diagDebyeActive)
             ionicSumField[celli];
 
         const scalar cellLength =
-            directionalCellLength[celli];
+            mesh.V()[celli]/max(maxFaceArea[celli], VSMALL);
 
         if
         (
-            ionicSum > diagDebyeMinIonicSum
-         && cellLength < GREAT
+            ionicSum > 0.0
+         && maxFaceArea[celli] > VSMALL
         )
         {
             const scalar lambdaSquared = epsilon.value()*Rgas.value()*T.value()/(Foam::sqr(Fdim.value())*ionicSum);
