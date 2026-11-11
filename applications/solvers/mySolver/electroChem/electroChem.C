@@ -12,6 +12,9 @@
 #include "currentManager.H"
 #include "OSspecific.H"
 #include <fstream>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -82,6 +85,53 @@ int main(int argc, char *argv[])
         // phiE already exists at t=0 as the solver's MUST_READ input.
     }
 
+    // Profiling uses wall-clock elapsed time, not CPU time. Each rank measures
+    // its own work; global maxima are reduced before master writes the log.
+    // Enable with `profiling true;` in system/controlDict.
+    const bool profilingEnabled =
+        runTime.controlDict().getOrDefault<Switch>("profiling", false);
+    using ProfileClock = std::chrono::steady_clock;
+    const auto profileNow = []() -> ProfileClock::time_point
+    {
+        return ProfileClock::now();
+    };
+    const auto profileSeconds = [](const ProfileClock::time_point& t) -> scalar
+    {
+        return std::chrono::duration_cast<std::chrono::duration<scalar>>
+        (ProfileClock::now() - t).count();
+    };
+    // Timers are inclusive at the call-site; `other` is the uninstrumented
+    // remainder of the outer iteration. Values are local until reduced.
+    const label nProfileSections = 7;
+    const char* profileNames[] =
+    {"current", "kinetics", "transport", "constraints", "potential",
+     "equilibrium", "reports"};
+    scalarList profileTotals(nProfileSections, 0.0);
+    labelList profileCalls(nProfileSections, 0);
+    scalar profileOuterTotal = 0.0;
+    label profileOuterCalls = 0;
+    const auto profileAppend = [&](const fileName& path,
+        const std::string& header, const std::string& line)
+    {
+        if (!Pstream::master()) return;
+        std::ifstream previous(path.c_str());
+        const bool empty = !previous.good()
+            || previous.peek() == std::ifstream::traits_type::eof();
+        previous.close();
+        std::ofstream output(path.c_str(), std::ios::app);
+        if (!output)
+            FatalErrorInFunction << "Cannot open profiling file " << path
+                << exit(FatalError);
+        if (empty) output << header << '\n';
+        output << line << '\n';
+        output.flush();
+        if (!output)
+            FatalErrorInFunction << "Cannot write profiling file " << path
+                << exit(FatalError);
+    };
+    if (profilingEnabled && Pstream::master())
+        mkDir(runTime.globalPath()/"postProcessing"/"profiling");
+
     Info<< "\nStarting time loop\n" << endl;
 
     label picardTimeSteps = 0;
@@ -109,6 +159,11 @@ int main(int argc, char *argv[])
         }
 
         ++runTime;
+        const auto profileStepStart = profileNow();
+        scalarList profileStepSections(nProfileSections, 0.0);
+        labelList profileStepCalls(nProfileSections, 0);
+        scalar profileStepOuter = 0.0;
+
 
         Info<< "Time = " << runTime.timeName() << nl << endl;
 
@@ -200,16 +255,36 @@ int main(int argc, char *argv[])
         for (label picardI = 0; picardI < maxPicardIter; ++picardI)
         {
             testedPicardStates = picardI + 1;
+            const auto profileOuterStart = profileNow();
+            scalarList profileIterationSections(nProfileSections, 0.0);
+            const auto profileRecord = [&](const label section,
+                const ProfileClock::time_point& start)
+            {
+                if (profilingEnabled)
+                {
+                    const scalar dt = profileSeconds(start);
+                    profileTotals[section] += dt;
+                    profileStepSections[section] += dt;
+                    profileIterationSections[section] += dt;
+                    ++profileCalls[section];
+                    ++profileStepCalls[section];
+                }
+            };
+
 
             Info<< "Picard state " << testedPicardStates
                 << '/' << maxPicardIter << nl;
 
             // Solve electrode metal potentials at frozen phiE, then freeze
             // the shared face currents for the complete species sweep.
+            const auto profileCurrentStart = profileNow();
             currentMgr.correct();
+            profileRecord(0, profileCurrentStart);
 
             // One common kinetic state for the complete species sweep.
+            const auto profileKineticStart = profileNow();
             reactionMgr.updateKineticRates();
+            profileRecord(1, profileKineticStart);
 
             // A retained lambda is only an initial guess. Its first complete
             // transport must be feasible before any constraints are evaluated.
@@ -239,7 +314,9 @@ int main(int argc, char *argv[])
 
                 // cEqn also supplies S_i = V/aP_i to reactionMgr. Current,
                 // potential and kinetic rates stay frozen across retries.
+                const auto profileTransportStart = profileNow();
                 #include "cEqn.H"
+                profileRecord(2, profileTransportStart);
                 if (!transportGuessRejected) break;
 
                 // Roll back EVERY species, including boundary values. Keep
@@ -261,11 +338,13 @@ int main(int argc, char *argv[])
             }
 
             // Both constraints are evaluated on this SAME transported state.
+            const auto profileConstraintStart = profileNow();
             reactionMgr.evaluateEquilibrium();
             potentialMgr.evaluateConstraint();
             if (currentMgr.requiresPotentialCoupling())
                 potentialMgr.refreshDiagnosticCurrent();
             currentMgr.evaluateConstraint();
+            profileRecord(3, profileConstraintStart);
 
             const bool currentOK = currentMgr.converged();
             const bool equilibriumOK = reactionMgr.equilibriumConverged();
@@ -278,18 +357,59 @@ int main(int argc, char *argv[])
             const bool constraintsOK = equilibriumOK && electroneutralityOK && currentOK;
 
             // Keep each constraint report adjacent to its applied correction.
+            const auto profileReportStart = profileNow();
             currentMgr.report();
             potentialMgr.report();
+            profileRecord(6, profileReportStart);
             if ((!electroneutralityOK || !currentOK) && !finalState)
+            {
+                const auto profilePotentialStart = profileNow();
                 potentialMgr.correct(!currentOK);
+                profileRecord(4, profilePotentialStart);
+            }
 
             reactionMgr.reportEquilibrium();
             if (!equilibriumOK && !finalState)
+            {
+                const auto profileEquilibriumStart = profileNow();
                 reactionMgr.correctEquilibrium();
+                profileRecord(5, profileEquilibriumStart);
+            }
             else
                 reactionMgr.reportNoEquilibriumCorrection
                 (equilibriumOK ? "equilibrium converged" : "maxIter reached");
 
+            if (profilingEnabled)
+            {
+                const scalar outerDt = profileSeconds(profileOuterStart);
+                profileOuterTotal += outerDt;
+                profileStepOuter += outerDt;
+                ++profileOuterCalls;
+                scalar other = outerDt;
+                forAll(profileIterationSections, si)
+                    other -= profileIterationSections[si];
+                // MPI collective: slowest rank determines elapsed work cost.
+                scalarList times(profileIterationSections);
+                forAll(times, si) reduce(times[si], maxOp<scalar>());
+                scalar maxOuter = outerDt;
+                scalar maxOther = other;
+                reduce(maxOuter, maxOp<scalar>());
+                reduce(maxOther, maxOp<scalar>());
+                if (Pstream::master())
+                {
+                    std::ostringstream row;
+                    row << std::setprecision(12) << runTime.value() << ' '
+                        << testedPicardStates << ' ' << maxOuter;
+                    forAll(times, si) row << ' ' << times[si];
+                    row << ' ' << maxOther;
+                    profileAppend
+                    (
+                        runTime.globalPath()/"postProcessing"/"profiling"/"iterations.dat",
+                        "# time picard outerWall_s current_s kinetics_s transport_s constraints_s potential_s equilibrium_s reports_s other_s",
+                        row.str()
+                    );
+                }
+            }
             if (constraintsOK)
             {
                 reactionMgr.acceptEquilibriumSources();
@@ -448,6 +568,36 @@ int main(int argc, char *argv[])
                     << picardPath << exit(FatalError);
         }
 
+        if (profilingEnabled)
+        {
+            scalar stepWall = profileSeconds(profileStepStart);
+            scalar maxOuter = profileStepOuter;
+            reduce(stepWall, maxOp<scalar>());
+            reduce(maxOuter, maxOp<scalar>());
+            scalarList maxSections(profileStepSections);
+            forAll(maxSections, si)
+                reduce(maxSections[si], maxOp<scalar>());
+            if (Pstream::master())
+            {
+                std::ostringstream row;
+                row << std::setprecision(12) << runTime.value() << ' '
+                    << testedPicardStates << ' ' << stepWall << ' '
+                    << maxOuter;
+                forAll(maxSections, si) row << ' ' << maxSections[si];
+                profileAppend
+                (
+                    runTime.globalPath()/"postProcessing"/"profiling"/"timesteps.dat",
+                    "# time picard stepWall_s outerWall_s current_s kinetics_s transport_s constraints_s potential_s equilibrium_s reports_s",
+                    row.str()
+                );
+                Info<< "Profiling: timestep wall=" << stepWall
+                    << " s, Picard wall=" << maxOuter << " s" << nl;
+                forAll(maxSections, si)
+                    Info<< "    " << profileNames[si] << ": "
+                        << maxSections[si] << " s (local calls "
+                        << profileStepCalls[si] << ") " << nl;
+            }
+        }
         runTime.printExecutionTime(Info);
     }
 
@@ -475,6 +625,15 @@ int main(int argc, char *argv[])
     reportConstraintIterations("ButlerVolmer", currentMgr.requiresPotentialCoupling(),
         currentMaxUsed, currentTotalUsed);
 
+    if (profilingEnabled)
+    {
+        Info<< "Profiling cumulative local work (seconds, calls):" << nl;
+        forAll(profileTotals, si)
+            Info<< "    " << profileNames[si] << ": " << profileTotals[si]
+                << " s / " << profileCalls[si] << " calls" << nl;
+        Info<< "    Picard: " << profileOuterTotal << " s / "
+            << profileOuterCalls << " iterations" << nl;
+    }
     Info<< "End\n" << endl;
 
     return 0;
