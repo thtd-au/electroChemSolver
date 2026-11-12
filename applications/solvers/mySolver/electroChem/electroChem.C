@@ -35,6 +35,7 @@ int main(int argc, char *argv[])
     #include "initContinuityErrs.H"
     #include "createDyMControls.H"
     #include "createFields.H"
+    const bool profilingEnabled = profilingPrint || profilingLog;
     #include "createUfIfPresent.H"
     turbulence->validate();
 
@@ -46,35 +47,41 @@ int main(int argc, char *argv[])
 
     // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-    const auto updatePotentialOutput = [&]()
-    // Read-only projection of the potential model's authoritative constraint.
+    const auto updatePotentialOutput = [&](const bool fieldWriteTime)
+    // Read-only diagnostics; do not touch output-only fields between writes.
     {
-        const scalarField& charge = potentialMgr.chargeResidual();
-        const scalarField& scale = potentialMgr.chargeScale();
-        forAll(charge, celli)
+        if (fieldWriteTime && (writeE || writeRelE))
         {
-            E[celli] = charge[celli];
-            relE[celli] = mag(charge[celli])/max(scale[celli], SMALL);
+            const scalarField& charge = potentialMgr.chargeResidual();
+            const scalarField& scale = potentialMgr.chargeScale();
+            forAll(charge, celli)
+            {
+                if (writeE) E[celli] = charge[celli];
+                if (writeRelE)
+                    relE[celli] = mag(charge[celli])/max(scale[celli], SMALL);
+            }
+            if (writeE) E.correctBoundaryConditions();
+            if (writeRelE) relE.correctBoundaryConditions();
         }
-        E.correctBoundaryConditions();
-        relE.correctBoundaryConditions();
-        if (writeGradPhiE || printGradPhiE)
+        if (printGradPhiE || (fieldWriteTime && writeGradPhiE))
         {
             gradPhiE = fvc::grad(phiE);
         }
-        if (writeKappa || writeJDiff || printKappa || printJDiff)
+        if (printKappa || printJDiff
+         || (fieldWriteTime && (writeKappa || writeJDiff)))
         {
             potentialMgr.refreshDiagnosticCurrent();
-            if (writeKappa || printKappa)
+            if (printKappa || (fieldWriteTime && writeKappa))
                 kappaOutput = potentialMgr.conductivityField();
-            if (writeJDiff || printJDiff)
+            if (printJDiff || (fieldWriteTime && writeJDiff))
                 jDiffOutput = potentialMgr.diffusionCurrentField();
         }
     };
 
     // Initial diagnostic snapshot. Never alter the initial transport/potential state.
     potentialMgr.evaluateConstraint();
-    updatePotentialOutput();
+    // The first snapshot is explicitly written at t=0 when requested.
+    updatePotentialOutput(runTime.value() == 0.0);
     if (runTime.value() == 0.0)
     {
         if (writeE) E.write();
@@ -87,9 +94,7 @@ int main(int argc, char *argv[])
 
     // Profiling uses wall-clock elapsed time, not CPU time. Each rank measures
     // its own work; global maxima are reduced before master writes the log.
-    // Enable with `profiling true;` in system/controlDict.
-    const bool profilingEnabled =
-        runTime.controlDict().getOrDefault<Switch>("profiling", false);
+    // Profiling and Picard log switches are initialized in createFields.H.
     using ProfileClock = std::chrono::steady_clock;
     const auto profileNow = []() -> ProfileClock::time_point
     {
@@ -129,7 +134,7 @@ int main(int argc, char *argv[])
             FatalErrorInFunction << "Cannot write profiling file " << path
                 << exit(FatalError);
     };
-    if (profilingEnabled && Pstream::master())
+    if (profilingLog && Pstream::master())
         mkDir(runTime.globalPath()/"postProcessing"/"profiling");
 
     Info<< "\nStarting time loop\n" << endl;
@@ -342,7 +347,7 @@ int main(int argc, char *argv[])
             reactionMgr.evaluateEquilibrium();
             potentialMgr.evaluateConstraint();
             if (currentMgr.requiresPotentialCoupling())
-                potentialMgr.refreshDiagnosticCurrent();
+                potentialMgr.refreshConstraintCurrent();
             currentMgr.evaluateConstraint();
             profileRecord(3, profileConstraintStart);
 
@@ -395,7 +400,7 @@ int main(int argc, char *argv[])
                 scalar maxOther = other;
                 reduce(maxOuter, maxOp<scalar>());
                 reduce(maxOther, maxOp<scalar>());
-                if (Pstream::master())
+                if (profilingLog && Pstream::master())
                 {
                     std::ostringstream row;
                     row << std::setprecision(12) << runTime.value() << ' '
@@ -465,7 +470,7 @@ int main(int argc, char *argv[])
             currentTotalUsed += used;
         }
 
-        updatePotentialOutput();
+        updatePotentialOutput(runTime.writeTime());
         // Accepted-state internal-cell statistics; means are volume weighted.
         const auto printScalarStats = [&](const word& name,
             const scalarField& values, const char* units)
@@ -536,7 +541,7 @@ int main(int argc, char *argv[])
         // Optional accepted-state statistics at the normal field-write times.
         // Use the global case path and master rank only, including in parallel.
         if (Pstream::master() && runTime.writeTime()
-         && runTime.controlDict().getOrDefault<Switch>("picardLog", false))
+         && picardLog)
         {
             const fileName picardDir
                 (runTime.globalPath()/"postProcessing"/"picard");
@@ -584,18 +589,21 @@ int main(int argc, char *argv[])
                     << testedPicardStates << ' ' << stepWall << ' '
                     << maxOuter;
                 forAll(maxSections, si) row << ' ' << maxSections[si];
-                profileAppend
+                if (profilingLog) profileAppend
                 (
                     runTime.globalPath()/"postProcessing"/"profiling"/"timesteps.dat",
                     "# time picard stepWall_s outerWall_s current_s kinetics_s transport_s constraints_s potential_s equilibrium_s reports_s",
                     row.str()
                 );
-                Info<< "Profiling: timestep wall=" << stepWall
-                    << " s, Picard wall=" << maxOuter << " s" << nl;
-                forAll(maxSections, si)
-                    Info<< "    " << profileNames[si] << ": "
-                        << maxSections[si] << " s (local calls "
-                        << profileStepCalls[si] << ") " << nl;
+                if (profilingPrint)
+                {
+                    Info<< "Profiling: timestep wall=" << stepWall
+                        << " s, Picard wall=" << maxOuter << " s" << nl;
+                    forAll(maxSections, si)
+                        Info<< "    " << profileNames[si] << ": "
+                            << maxSections[si] << " s (local calls "
+                            << profileStepCalls[si] << ") " << nl;
+                }
             }
         }
         runTime.printExecutionTime(Info);
@@ -625,7 +633,7 @@ int main(int argc, char *argv[])
     reportConstraintIterations("ButlerVolmer", currentMgr.requiresPotentialCoupling(),
         currentMaxUsed, currentTotalUsed);
 
-    if (profilingEnabled)
+    if (profilingPrint)
     {
         Info<< "Profiling cumulative local work (seconds, calls):" << nl;
         forAll(profileTotals, si)

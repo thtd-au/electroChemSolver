@@ -10,6 +10,10 @@
 #include <vector>
 #include <algorithm>
 #include <limits>
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+#include "OSspecific.H"
 
 namespace
 {
@@ -200,7 +204,12 @@ reactionManager::reactionManager
     transportResponse_(), residual_(), residualScale_(),
     equilibriumAbsTol_(), equilibriumRelTol_(), equilibriumRelaxation_(1.0),
     equilibriumFBL_(false), equilibriumFractionToBoundary_(0.99),
-    responseSolver_(), transportMatrices_(),
+    responseSolver_(), transportMatrices_(), responseTrials_(),
+    responseOperators_(), equilibriumParticipating_(),
+    profilingLog_(mesh.time().controlDict().optionalSubDict("profiling")
+        .getOrDefault<Switch>("log", false)),
+    responseSolveCalls_(0), responseLinearIterations_(0),
+    responseAssemblySeconds_(0), responseSolveSeconds_(0),
     coupledRestart_(20), coupledMaxIter_(100),
     coupledRelTol_(1e-6), coupledAbsTol_(1e-12),
     coupledMaxBacktracks_(30), coupledReduction_(0.5),
@@ -216,6 +225,11 @@ reactionManager::reactionManager
     readReactions();
     readEquilibriumControls();
     buildAndValidateEquilibriumStoichiometry();
+    equilibriumParticipating_.setSize(species_.size(), false);
+    forAll(equilibriumParticipating_, i)
+        forAll(equilibriumN_[i], r)
+            equilibriumParticipating_[i] = equilibriumParticipating_[i]
+                || equilibriumN_[i][r] != 0;
 
     transportResponse_.setSize(species_.size());
     forAll(transportResponse_, i)
@@ -391,6 +405,8 @@ void reactionManager::readEquilibriumControls()
     if (eqControls.found("responseSolver"))
         responseSolver_.merge(eqControls.subDict("responseSolver"));
     transportMatrices_.setSize(species_.size());
+    responseTrials_.setSize(species_.size());
+    responseOperators_.setSize(species_.size());
 
     dictionary k;
     if (eqControls.found("coupledSolver")) k = eqControls.subDict("coupledSolver");
@@ -789,12 +805,48 @@ void reactionManager::setTransportResponse(const label speciesI, const fvScalarM
     if (speciesI < 0 || speciesI >= species_.size() || speciesI == inertIndex_)
         FatalErrorInFunction << "Invalid active species index " << speciesI << exit(FatalError);
 
+    if (equilibriumParticipating_[speciesI])
     {
-        bool participating = false;
-        forAll(equilibriumN_[speciesI], r)
-            participating = participating || equilibriumN_[speciesI][r] != 0;
-        if (participating)
-            transportMatrices_.set(speciesI, new fvScalarMatrix(cEqn));
+        // A new transport matrix is assembled every Picard sweep. Prepare its
+        // homogeneous perturbation operator exactly once rather than once per
+        // GMRES matrix-vector product. This never alters the physical ci.
+        transportMatrices_.set(speciesI, new fvScalarMatrix(cEqn));
+        responseOperators_.set(speciesI, nullptr);
+        responseTrials_.set(speciesI, nullptr);
+        responseTrials_.set
+        (
+            speciesI,
+            new volScalarField
+            (
+                IOobject
+                (
+                    c_[speciesI].name(), mesh_.time().timeName(), mesh_,
+                    IOobject::NO_READ, IOobject::NO_WRITE, false
+                ),
+                c_[speciesI]
+            )
+        );
+        volScalarField& trial = responseTrials_[speciesI];
+        trial.primitiveFieldRef() = 0.0;
+        forAll(trial.boundaryField(), patchi)
+            trial.boundaryFieldRef()[patchi] == scalar(0);
+
+        const fvScalarMatrix& stored = transportMatrices_[speciesI];
+        responseOperators_.set
+        (
+            speciesI,
+            new fvScalarMatrix(trial, stored.dimensions())
+        );
+        fvScalarMatrix& responseEqn = responseOperators_[speciesI];
+        responseEqn.diag() = stored.diag();
+        if (!stored.diagonal()) responseEqn.upper() = stored.upper();
+        if (stored.asymmetric()) responseEqn.lower() = stored.lower();
+        responseEqn.internalCoeffs() = stored.internalCoeffs();
+        responseEqn.boundaryCoeffs() = stored.boundaryCoeffs();
+        forAll(trial.boundaryField(), patchi)
+            if (!trial.boundaryField()[patchi].coupled())
+                responseEqn.boundaryCoeffs()[patchi] = 0.0;
+        responseEqn.source() = 0.0;
     }
 
     const scalarField& aP = cEqn.diag();
@@ -951,11 +1003,41 @@ void reactionManager::correctEquilibrium()
     }
 
     if (equilibriumDiagnostics_) diagnosticKineticDeltaC_ = kineticResponse;
+    const label oldResponseCalls = responseSolveCalls_;
+    const label oldLinearIterations = responseLinearIterations_;
+    const scalar oldAssemblySeconds = responseAssemblySeconds_;
+    const scalar oldSolveSeconds = responseSolveSeconds_;
     applyTransportMatrixCorrection
     (
         coupledNewtonDirection(baseline), baseline, kineticResponse,
         relaxationCap
     );
+    if (profilingLog_)
+    {
+        scalar assembly = responseAssemblySeconds_ - oldAssemblySeconds;
+        scalar solve = responseSolveSeconds_ - oldSolveSeconds;
+        label calls = responseSolveCalls_ - oldResponseCalls;
+        label iterations = responseLinearIterations_ - oldLinearIterations;
+        reduce(assembly, maxOp<scalar>());
+        reduce(solve, maxOp<scalar>());
+        reduce(calls, maxOp<label>());
+        reduce(iterations, maxOp<label>());
+        if (Pstream::master())
+        {
+            static std::ofstream log;
+            if (!log.is_open())
+            {
+                const fileName dir = mesh_.time().globalPath()/"postProcessing"/"profiling";
+                mkDir(dir);
+                log.open((dir/"equilibrium_response_detail.dat").c_str(), std::ios::app);
+                if (!log) FatalErrorInFunction << "Cannot open equilibrium_response_detail.dat" << exit(FatalError);
+                log << "# time responseSolves linearIterations assembly_s linearSolve_s\n";
+            }
+            log << std::setprecision(12) << mesh_.time().value()
+                << ' ' << calls << ' ' << iterations << ' '
+                << assembly << ' ' << solve << '\n';
+        }
+    }
     equilibriumEvaluated_ = false;
     equilibriumConverged_ = false;
 }
@@ -1007,19 +1089,75 @@ List<scalarField> reactionManager::coupledNewtonDirection
                         *transportResponse_[i][celli]*equilibriumN_[i][s];
         }
     }
-    // Right preconditioning uses the existing local equilibrium Jacobian.
-    const auto precondition = [&](const Vector& v)
+    // The local Jacobian stays frozen throughout GMRES. Factor each cell's
+    // scaled-pivot preconditioner once and reuse it in every application.
+    // Store row-interchange sequence to apply to each new right-hand side.
+    List<labelList> pivotRows(nc);
+    const scalar pivotTol = 100*SMALL;
+    for (label celli=0; celli<nc; ++celli)
     {
-        Vector z(v.size(), 0.0);
-        scalarField rhs(ne), solution;
-        for (label celli=0; celli<nc; ++celli)
+        scalarSquareMatrix& A = preconditioner[celli];
+        pivotRows[celli].setSize(ne);
+        scalarField rowScale(ne, 0.0);
+        for (label i=0; i<ne; ++i)
+            for (label j=0; j<ne; ++j)
+                rowScale[i] = max(rowScale[i], mag(A(i,j)));
+        for (label k=0; k<ne; ++k)
         {
-            for (label r=0; r<ne; ++r) rhs[r] = v[r*nc+celli];
-            scalar pivot=GREAT;
-            if (!solveLocalSystem(preconditioner[celli], rhs, solution, pivot))
+            label pivot = k;
+            scalar best = -1;
+            for (label i=k; i<ne; ++i)
+            {
+                const scalar rel = rowScale[i] > VSMALL
+                    ? mag(A(i,k))/rowScale[i] : 0.0;
+                if (rel > best) { best = rel; pivot = i; }
+            }
+            if (best <= pivotTol)
                 FatalErrorInFunction
                     << "Singular coupled Newton preconditioner at cell "
                     << celli << exit(FatalError);
+            pivotRows[celli][k] = pivot;
+            if (pivot != k)
+            {
+                for (label j=0; j<ne; ++j)
+                    Swap(A(k,j), A(pivot,j));
+                Swap(rowScale[k], rowScale[pivot]);
+            }
+            for (label i=k+1; i<ne; ++i)
+            {
+                const scalar f = A(i,k)/A(k,k);
+                // Retain multipliers for forward substitution.
+                A(i,k) = f;
+                for (label j=k+1; j<ne; ++j)
+                    A(i,j) -= f*A(k,j);
+            }
+        }
+    }
+    // Right preconditioning uses the cached local LU factorization.
+    const auto precondition = [&](const Vector& v)
+    {
+        Vector z(v.size(), 0.0);
+        scalarField solution(ne);
+        for (label celli=0; celli<nc; ++celli)
+        {
+            const scalarSquareMatrix& A = preconditioner[celli];
+            for (label r=0; r<ne; ++r) solution[r] = v[r*nc+celli];
+            for (label k=0; k<ne; ++k)
+                if (pivotRows[celli][k] != k)
+                    Swap(solution[k], solution[pivotRows[celli][k]]);
+            for (label i=0; i<ne; ++i)
+                for (label j=0; j<i; ++j)
+                    solution[i] -= A(i,j)*solution[j];
+            for (label ii=ne; ii-- > 0; )
+            {
+                for (label j=ii+1; j<ne; ++j)
+                    solution[ii] -= A(ii,j)*solution[j];
+                solution[ii] /= A(ii,ii);
+                if (!std::isfinite(solution[ii]))
+                    FatalErrorInFunction
+                        << "Non-finite coupled Newton preconditioner response at cell "
+                        << celli << exit(FatalError);
+            }
             for (label r=0; r<ne; ++r) z[r*nc+celli] = solution[r];
         }
         return z;
@@ -1120,58 +1258,49 @@ List<scalarField> reactionManager::transportMatrixResponse
     forAll(species_, i)
     {
         response[i].setSize(mesh_.nCells(), 0.0);
-        bool participating = false;
-        forAll(equilibriumN_[i], r)
-            participating = participating || equilibriumN_[i][r] != 0;
-        if (!participating || i == inertIndex_) continue;
-        if (!transportMatrices_.set(i))
-            FatalErrorInFunction << "Missing transport matrix for " << species_[i]
-                << exit(FatalError);
-        const fvScalarMatrix& stored = transportMatrices_[i];
-
-        // Use an unregistered clone with the same concentration name, so
-        // species-dependent patch types retain their species identity.
-        // The real concentration field is never modified by this solve.
-        volScalarField trial
-        (
-            IOobject(c_[i].name(), mesh_.time().timeName(), mesh_,
-                IOobject::NO_READ, IOobject::NO_WRITE, false),
-            c_[i]
-        );
-        fvScalarMatrix responseEqn(trial, stored.dimensions());
-        responseEqn.diag() = stored.diag();
-        if (!stored.diagonal()) responseEqn.upper() = stored.upper();
-        if (stored.asymmetric()) responseEqn.lower() = stored.lower();
-        responseEqn.internalCoeffs() = stored.internalCoeffs();
-        responseEqn.boundaryCoeffs() = stored.boundaryCoeffs();
-
-        // Homogeneous perturbation of the frozen transport operator.
+        if (!equilibriumParticipating_[i] || i == inertIndex_) continue;
+        // A zero source produces the identically zero homogeneous response.
+        // Detect it before allocating a trial field or copying the matrix.
+        // All ranks must take the same branch for coupled transport solves.
+        scalar maxSource = 0.0;
+        for (label celli=0; celli<mesh_.nCells(); ++celli)
+        {
+            scalar source = 0.0;
+            forAll(direction, r)
+                source += equilibriumN_[i][r]*direction[r][celli];
+            if (speciesSource) source += (*speciesSource)[i][celli];
+            maxSource = max(maxSource, mag(source));
+        }
+        reduce(maxSource, maxOp<scalar>());
+        if (maxSource == 0) continue;
+        const auto responseStart = std::chrono::steady_clock::now();
+        if (!responseOperators_.set(i) || !responseTrials_.set(i))
+            FatalErrorInFunction << "Missing prepared response operator for "
+                << species_[i] << exit(FatalError);
+        volScalarField& trial = responseTrials_[i];
+        fvScalarMatrix& responseEqn = responseOperators_[i];
+        // Reinitialize the response state and RHS, preserving the frozen matrix
+        // coefficients and homogeneous boundary treatment across Krylov calls.
         trial.primitiveFieldRef() = 0.0;
         forAll(trial.boundaryField(), patchi)
-        {
             trial.boundaryFieldRef()[patchi] == scalar(0);
-            if (!trial.boundaryField()[patchi].coupled())
-                responseEqn.boundaryCoeffs()[patchi] = 0.0;
-        }
         responseEqn.source() = 0.0;
         forAll(direction, r)
             responseEqn.source() +=
                 mesh_.V()*equilibriumN_[i][r]*direction[r];
         if (speciesSource)
             responseEqn.source() += mesh_.V()*(*speciesSource)[i];
-        {
-            scalar maxSource = 0.0;
-            forAll(responseEqn.source(), celli)
-                maxSource = max(maxSource, mag(responseEqn.source()[celli]));
-            reduce(maxSource, maxOp<scalar>());
-            if (maxSource == 0) continue;
-        }
         if (outputLevel_ >= 2)
             Info<< "Equilibrium transport response solve: species="
                 << species_[i] << nl;
         dictionary controls(responseSolver_);
         controls.set("log", label(outputLevel_ >= 2 ? 1 : 0));
+        const auto solveStart = std::chrono::steady_clock::now();
+        responseAssemblySeconds_ += std::chrono::duration<scalar>(solveStart-responseStart).count();
         const auto performance = responseEqn.solve(controls);
+        responseSolveSeconds_ += std::chrono::duration<scalar>(std::chrono::steady_clock::now()-solveStart).count();
+        ++responseSolveCalls_;
+        responseLinearIterations_ += performance.nIterations();
         bool responseOK = performance.converged();
         reduce(responseOK, andOp<bool>());
         if (!responseOK)

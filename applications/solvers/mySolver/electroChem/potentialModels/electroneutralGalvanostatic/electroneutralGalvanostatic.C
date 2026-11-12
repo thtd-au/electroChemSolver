@@ -8,6 +8,10 @@
 #include "fvcLaplacian.H"
 #include "fvmLaplacian.H"
 #include "PstreamReduceOps.H"
+#include "OSspecific.H"
+#include <chrono>
+#include <fstream>
+#include <iomanip>
 
 namespace Foam
 {
@@ -62,7 +66,11 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
         dimensionedVector("zero", dimensionSet(0,-2,0,0,0,1,0), vector::zero)
     ),
     kappaFace_(nullptr),
-    jDiffFlux_(nullptr)
+    jDiffFlux_(nullptr),
+    deltaPhiCorrection_(nullptr),
+    hasFixedPotentialCorrection_(false),
+    profilingLog_(mesh.time().controlDict().optionalSubDict("profiling")
+        .getOrDefault<Switch>("log", false))
 {
     if (minConductivity_ <= 0.0)
     {
@@ -180,10 +188,11 @@ void electroneutralGalvanostatic::selectReferenceCell()
         electroChemParallel::referenceCell(mesh_, referencePatchName_);
 }
 
-void electroneutralGalvanostatic::updateCurrentFields()
+void electroneutralGalvanostatic::updateCurrentFields(const bool includeVectorDiagnostic)
 {
     kappa_ = dimensionedScalar("zero", kappa_.dimensions(), 0.0);
-    jDiff_ = dimensionedVector("zero", jDiff_.dimensions(), vector::zero);
+    if (includeVectorDiagnostic)
+        jDiff_ = dimensionedVector("zero", jDiff_.dimensions(), vector::zero);
 
     forAll(c_, i)
     {
@@ -203,28 +212,26 @@ void electroneutralGalvanostatic::updateCurrentFields()
             sqr(F_)*sqr(z_[i])*Di*c_[i]
            /(Rgas_*T_);
 
-        jDiff_ -= F_*z_[i]*Di*fvc::grad(c_[i]);
+        if (includeVectorDiagnostic)
+            jDiff_ -= F_*z_[i]*Di*fvc::grad(c_[i]);
     }
 
     kappaFace_() = fvc::interpolate(kappa_);
 
 
     // Use species-face diffusion discretization consistent with transport.
-    surfaceScalarField jDiffSpeciesFaces
-    (
-        IOobject("jDiffSpeciesFaces", mesh_.time().timeName(), mesh_,
-            IOobject::NO_READ, IOobject::NO_WRITE, false),
-        mesh_, dimensionedScalar("zero", jDiffFlux_().dimensions(), 0.0)
-    );
+    // Accumulate directly into the persistent registered face-flux field.
+    // The previous temporary jDiffSpeciesFaces duplicated a full surface
+    // scalar field on every current update and was copied back afterwards.
+    jDiffFlux_() = dimensionedScalar("zero", jDiffFlux_().dimensions(), 0.0);
     forAll(c_, i)
     {
         if (mag(z_[i]) <= SMALL) continue;
         const volScalarField& Di =
             mesh_.lookupObject<volScalarField>("D_eff_" + species_[i]);
-        jDiffSpeciesFaces -=
+        jDiffFlux_() -=
             F_*z_[i]*fvc::interpolate(Di)*fvc::snGrad(c_[i])*mesh_.magSf();
     }
-    jDiffFlux_() = jDiffSpeciesFaces;
 
 }
 
@@ -323,54 +330,82 @@ void electroneutralGalvanostatic::correct(const bool force)
     // solve even when the deliberately relaxed neutrality test already passes.
     if (converged_ && !force) return;
 
+    // Subsection profile. Each phase is measured locally, then reduced as a
+    // rank-wise maximum before buffered output (only when profiling is enabled).
+    using Clock = std::chrono::steady_clock;
+    const bool prof = profilingLog_;
+    scalar timings[7] = {0,0,0,0,0,0,0};
+    const auto tick = []() { return Clock::now(); };
+    const auto secs = [](const Clock::time_point& t)
+    {
+        return std::chrono::duration_cast<std::chrono::duration<scalar>>(Clock::now()-t).count();
+    };
+    const auto tFields = tick();
     updateCurrentFields();
+    timings[0] = secs(tFields);
 
     // Update the absolute phiE galvanostatic gradients now that jDiffFlux and
     // kappaFace correspond to the current transported concentrations.
+    const auto tBC = tick();
     phiE_.boundaryFieldRef().evaluate();
+    timings[1] = secs(tBC);
 
-    wordList correctionPatchTypes(mesh_.boundary().size(), "fixedGradient");
-    bool hasFixedPotential = false;
-    forAll(phiE_.boundaryField(), patchi)
+    const auto tPrepare = tick();
+    if (!deltaPhiCorrection_.valid())
     {
-        const fvPatchScalarField& p = phiE_.boundaryField()[patchi];
-        if (electroChemParallel::preserveConstraint(p))
+        wordList correctionPatchTypes(mesh_.boundary().size(), "fixedGradient");
+        forAll(phiE_.boundaryField(), patchi)
         {
-            correctionPatchTypes[patchi] = electroChemParallel::constraintType(p);
+            const fvPatchScalarField& p = phiE_.boundaryField()[patchi];
+            if (electroChemParallel::preserveConstraint(p))
+                correctionPatchTypes[patchi] = electroChemParallel::constraintType(p);
+            else if (isA<fixedValueFvPatchScalarField>(p))
+            {
+                correctionPatchTypes[patchi] = "fixedValue";
+                hasFixedPotentialCorrection_ = true;
+            }
         }
-        else if (isA<fixedValueFvPatchScalarField>(p))
-        {
-            correctionPatchTypes[patchi] = "fixedValue";
-            hasFixedPotential = true;
-        }
+        reduce(hasFixedPotentialCorrection_, orOp<bool>());
+        deltaPhiCorrection_.reset
+        (
+            new volScalarField
+            (
+                IOobject("deltaPhiE", mesh_.time().timeName(), mesh_,
+                    IOobject::NO_READ, IOobject::NO_WRITE, false),
+                mesh_, dimensionedScalar("zero", phiE_.dimensions(), 0.0),
+                correctionPatchTypes
+            )
+        );
     }
-    reduce(hasFixedPotential, orOp<bool>());
+    volScalarField& deltaPhi = deltaPhiCorrection_();
+    // The field topology and patch types are reusable, but correction values
+    // and physical boundary gradients must be refreshed for every solve.
+    deltaPhi.primitiveFieldRef() = scalar(0);
+    timings[2] = secs(tPrepare);
 
-    volScalarField deltaPhi
-    (
-        IOobject("deltaPhiE", mesh_.time().timeName(), mesh_, IOobject::NO_READ, IOobject::NO_WRITE),
-        mesh_,
-        dimensionedScalar("zero", phiE_.dimensions(), 0.0),
-        correctionPatchTypes
-    );
-
+    const auto tCorrectionBC = tick();
     setCorrectionBoundaryConditions(deltaPhi);
     deltaPhi.correctBoundaryConditions();
+    timings[3] = secs(tCorrectionBC);
 
     const label outputLevel = picardOutputLevel(mesh_.time().controlDict());
     // Correct the frozen-concentration current-conservation residual.
     // j = jDiff - kappa*grad(phiE), so the updated field targets div(j)=0.
+    const auto tAssembly = tick();
     fvScalarMatrix deltaEqn
     (
         fvm::laplacian(kappa_, deltaPhi)
       == fvc::div(jDiffFlux_()) - fvc::laplacian(kappa_, phiE_)
     );
-    if (!hasFixedPotential) deltaEqn.setReference(referenceCell_, 0.0);
+    if (!hasFixedPotentialCorrection_) deltaEqn.setReference(referenceCell_, 0.0);
+    timings[4] = secs(tAssembly);
     dictionary solverControls(deltaEqn.solverDict(phiE_.name()));
     // Emit the result explicitly so the selected Picard verbosity does not
     // depend on the linear solver's own logging implementation.
     solverControls.set("log", label(0));
+    const auto tSolve = tick();
     const auto potentialPerformance = deltaEqn.solve(solverControls);
+    timings[5] = secs(tSolve);
     if (outputLevel >= 1)
     {
         Info<< solverControls.get<word>("solver")
@@ -388,8 +423,33 @@ void electroneutralGalvanostatic::correct(const bool force)
         << relaxation_*maxAbsDeltaPhi << " V"
         << nl;
 
+    const auto tUpdate = tick();
     phiE_.primitiveFieldRef() += relaxation_*deltaPhi.primitiveField();
     phiE_.correctBoundaryConditions();
+    timings[6] = secs(tUpdate);
+
+    if (prof)
+    {
+        for (scalar& value : timings) reduce(value, maxOp<scalar>());
+        if (Pstream::master())
+        {
+            // Buffered stream avoids reopening/flushing a file on every solve.
+            static std::ofstream log;
+            if (!log.is_open())
+            {
+                const fileName dir = mesh_.time().globalPath()/"postProcessing"/"profiling";
+                mkDir(dir);
+                log.open((dir/"potential_detail.dat").c_str(), std::ios::app);
+                if (!log) FatalErrorInFunction << "Cannot open potential_detail.dat" << exit(FatalError);
+                log << "# time fields_s absoluteBC_s reuseField_s correctionBC_s assembly_s solve_s update_s linearIterations initialResidual finalResidual\n";
+            }
+            log << std::setprecision(12) << mesh_.time().value();
+            for (const scalar value : timings) log << " " << value;
+            log << " " << potentialPerformance.nIterations()
+                << " " << potentialPerformance.initialResidual()
+                << " " << potentialPerformance.finalResidual() << "\n";
+        }
+    }
 
     evaluated_ = false; // correction must be followed by transport before retest
 }

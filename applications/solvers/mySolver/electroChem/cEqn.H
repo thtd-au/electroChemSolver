@@ -1,7 +1,5 @@
 // cEqn.H -- PotentialReaction reactive Nernst-Planck transport
 
-const bool hasChargeNumber = reactions.found("chargeNumber");
-
 surfaceScalarField gradPhiEFlux
 (
     IOobject
@@ -37,12 +35,7 @@ forAll(c, i)
 
     const volScalarField& Di = effectiveDiffusivities[i];
 
-    scalar zi = 0.0;
-    if (hasChargeNumber)
-    {
-        zi = reactions.subDict("chargeNumber")
-            .getOrDefault<scalar>(species[i], 0.0);
-    }
+    const scalar zi = transportChargeNumbers[i];
 
     surfaceScalarField migrationFlux
     (
@@ -54,8 +47,23 @@ forAll(c, i)
             IOobject::NO_READ,
             IOobject::NO_WRITE
         ),
-        fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)*gradPhiEFlux
+        mesh, dimensionedScalar
+        (
+            "zero",
+            (Di.dimensions()*Fdim.dimensions()
+              /(Rgas.dimensions()*T.dimensions())*ci.dimensions())
+             *gradPhiEFlux.dimensions(),
+            0.0
+        )
     );
+    // Skip the expensive interpolation for neutral species and whenever the
+    // potential model is inactive. Leave a dimensionally correct zero flux,
+    // preserving the unchanged transport-equation assembly below.
+    if (potentialMgr.active() && mag(zi) > SMALL)
+    {
+        migrationFlux =
+            fvc::interpolate(Di*zi*Fdim/(Rgas*T)*ci)*gradPhiEFlux;
+    }
 
     const bool captureReactionSplit = diagTransportActive || diagConservationActive;
     tmp<volScalarField> tReactionSource = reactionMgr.source

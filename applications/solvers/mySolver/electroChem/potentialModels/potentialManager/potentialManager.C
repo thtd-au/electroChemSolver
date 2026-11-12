@@ -62,6 +62,7 @@ public:
     const scalarField& chargeResidual() const override { return residual_; }
     const scalarField& chargeScale() const override { return scale_; }
     void refreshDiagnosticCurrent() override {}
+    void refreshConstraintCurrent() override {}
     const volScalarField& conductivityField() const override { return kappa_; }
     const volVectorField& diffusionCurrentField() const override { return jDiff_; }
 };

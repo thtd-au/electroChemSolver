@@ -107,6 +107,17 @@ class reactionManager
     scalar equilibriumFractionToBoundary_;
     dictionary responseSolver_;
     PtrList<fvScalarMatrix> transportMatrices_;
+    // Frozen homogeneous response systems, refreshed by setTransportResponse()
+    // after assembly of each species transport equation. The field must outlive
+    // the matrix, which holds a reference to it.
+    mutable PtrList<volScalarField> responseTrials_;
+    mutable PtrList<fvScalarMatrix> responseOperators_;
+    boolList equilibriumParticipating_;
+    bool profilingLog_;
+    mutable label responseSolveCalls_;
+    mutable label responseLinearIterations_;
+    mutable scalar responseAssemblySeconds_;
+    mutable scalar responseSolveSeconds_;
     label coupledRestart_;
     label coupledMaxIter_;
     scalar coupledRelTol_;

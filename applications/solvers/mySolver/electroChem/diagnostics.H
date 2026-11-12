@@ -6,7 +6,7 @@
 
     // pH is a post-convergence diagnostic derived from the accepted H+ field.
     // The floor protects log10 only and never modifies c_Hplus.
-    if (pHActive)
+    if (pHActive && (printPH || (writePH && runTime.writeTime())))
     {
         volScalarField& pH = pHPtr();
         const volScalarField& cH = c[HplusIndex];
@@ -301,7 +301,9 @@
 
     // ############################################################ Transport ############################################################ 
 
-    if (diagTransportActive)
+    // Transport diagnostics are instantaneous: no need to evaluate fields
+    // on timesteps where nothing is printed or logged.
+    if (diagTransportPrint || (diagTransportLog && diagLogTime))
     {
         if (diagTransportPrint)
         {
@@ -684,7 +686,11 @@
 
 // ############################################################ Debye resolution ############################################################
 
-if (diagDebyeActive)
+// Debye fields are diagnostic-only; refresh at print/log/write times.
+if (diagDebyeActive
+ && (diagDebyePrint || (diagDebyeLog && diagLogTime)
+  || (runTime.writeTime() && (diagDebyeWriteIonicSum
+       || diagDebyeWriteLambda || diagDebyeWriteE))))
 {
     lambdaD =
         dimensionedScalar
@@ -815,7 +821,12 @@ if (diagDebyeActive)
 
 // ############################################################ Saturation ############################################################
 
-    if (diagSaturationActive && henrySpecies.size())
+    // Saturation is output-only. Respect the independent log cadence.
+    if (diagSaturationActive && henrySpecies.size()
+     && (diagSatPrintSi || diagSatPrintSTot || diagSatPrintPEqi
+      || diagSatPrintPEqTot || (diagSatLog && diagLogTime)
+      || (runTime.writeTime() && (diagSatWriteSi || diagSatWriteSTot
+          || diagSatWritePEqi || diagSatWritePEqTot))))
     {
         volScalarField pAbs
         (

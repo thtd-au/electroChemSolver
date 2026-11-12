@@ -225,6 +225,7 @@ public:
     virtual const scalarField& chargeResidual() const = 0;
     virtual const scalarField& chargeScale() const = 0;
     virtual void refreshDiagnosticCurrent() = 0;
+    virtual void refreshConstraintCurrent() = 0;
     virtual const volScalarField& conductivityField() const = 0;
     virtual const volVectorField& diffusionCurrentField() const = 0;
 };
@@ -257,6 +258,7 @@ public:
     const scalarField& chargeResidual() const { return model_->chargeResidual(); }
     const scalarField& chargeScale() const { return model_->chargeScale(); }
     void refreshDiagnosticCurrent() { model_->refreshDiagnosticCurrent(); }
+    void refreshConstraintCurrent() { model_->refreshConstraintCurrent(); }
     const volScalarField& conductivityField() const { return model_->conductivityField(); }
     const volVectorField& diffusionCurrentField() const { return model_->diffusionCurrentField(); }
 };

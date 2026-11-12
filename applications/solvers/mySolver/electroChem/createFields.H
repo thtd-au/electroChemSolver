@@ -147,6 +147,22 @@ const dimensionedScalar rho
 
 const dictionary& controlDict = runTime.controlDict();
 
+// Profiling controls: optional and independently disabled by default.
+// Profiling files and summaries are separate from the Picard convergence log.
+Switch profilingPrint(false);
+Switch profilingLog(false);
+Switch picardLog(false);
+
+if (controlDict.found("profiling"))
+{
+    const dictionary& d = controlDict.subDict("profiling");
+    profilingPrint = d.getOrDefault<Switch>("print", false);
+    profilingLog = d.getOrDefault<Switch>("log", false);
+}
+
+// Existing independent Picard iteration-count log, written at writeTime.
+picardLog = controlDict.getOrDefault<Switch>("picardLog", false);
+
 // Species control
 Switch printCFields(false);
 Switch printCFieldsBeforeClipping(false);
@@ -522,6 +538,19 @@ if (reactions.found("chargeNumber"))
             << " has charge number " << zInert << '.' << nl
             << "Choose an electrically neutral inert species."
             << exit(FatalIOError);
+    }
+}
+
+// Fixed species charge numbers are shared by the species transport sweeps.
+// Reading the reaction dictionary once avoids lookups in every Picard sweep.
+scalarList transportChargeNumbers(species.size(), 0.0);
+if (reactions.found("chargeNumber"))
+{
+    const dictionary& transportChargeDict = reactions.subDict("chargeNumber");
+    forAll(species, i)
+    {
+        transportChargeNumbers[i] =
+            transportChargeDict.getOrDefault<scalar>(species[i], 0.0);
     }
 }
 

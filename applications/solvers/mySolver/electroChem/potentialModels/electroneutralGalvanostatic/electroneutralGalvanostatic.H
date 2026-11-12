@@ -32,8 +32,11 @@ class electroneutralGalvanostatic : public potentialModel
     volVectorField jDiff_;
     autoPtr<surfaceScalarField> kappaFace_;
     autoPtr<surfaceScalarField> jDiffFlux_;
+    autoPtr<volScalarField> deltaPhiCorrection_;
+    bool hasFixedPotentialCorrection_;
+    bool profilingLog_;
 
-    void updateCurrentFields();
+    void updateCurrentFields(const bool includeVectorDiagnostic = false);
     void selectReferenceCell();
     void setCorrectionBoundaryConditions(volScalarField& deltaPhi) const;
 
@@ -59,7 +62,8 @@ public:
     virtual void report() const;
     virtual const scalarField& chargeResidual() const { return chargeResidual_; }
     virtual const scalarField& chargeScale() const { return chargeScale_; }
-    virtual void refreshDiagnosticCurrent() { updateCurrentFields(); }
+    virtual void refreshDiagnosticCurrent() { updateCurrentFields(true); }
+    virtual void refreshConstraintCurrent() { updateCurrentFields(false); }
     virtual const volScalarField& conductivityField() const { return kappa_; }
     virtual const volVectorField& diffusionCurrentField() const { return jDiff_; }
 };
