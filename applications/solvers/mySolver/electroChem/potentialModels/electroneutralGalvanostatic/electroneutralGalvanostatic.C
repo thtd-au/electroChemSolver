@@ -47,6 +47,7 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
     absTol_(0.0),
     relTol_(0.0),
     relaxation_(1.0),
+    potentialCorrectionInitialGuess_("zero"),
     z_(species.size(), 0.0),
     D_(species.size(), 0.0),
     chargeResidual_(mesh.nCells(), 0.0),
@@ -90,6 +91,19 @@ electroneutralGalvanostatic::electroneutralGalvanostatic
     absTol_ = en.get<scalar>("absTol");
     relTol_ = en.get<scalar>("relTol");
     relaxation_ = en.get<scalar>("relaxation");
+    potentialCorrectionInitialGuess_ =
+        en.getOrDefault<word>("potentialCorrectionInitialGuess", "zero");
+    if
+    (
+        potentialCorrectionInitialGuess_ != "zero"
+     && potentialCorrectionInitialGuess_ != "previous"
+    )
+    {
+        FatalIOErrorInFunction(en)
+            << "potentialCorrectionInitialGuess must be zero or previous, got "
+            << potentialCorrectionInitialGuess_
+            << exit(FatalIOError);
+    }
 
     if (absTol_ <= 0 || relTol_ < 0 || relaxation_ <= 0 || relaxation_ > 1)
     {
@@ -378,9 +392,14 @@ void electroneutralGalvanostatic::correct(const bool force)
         );
     }
     volScalarField& deltaPhi = deltaPhiCorrection_();
-    // The field topology and patch types are reusable, but correction values
-    // and physical boundary gradients must be refreshed for every solve.
-    deltaPhi.primitiveFieldRef() = scalar(0);
+    // Optionally use the preceding *solved correction* as the initial guess.
+    // The first correction always starts from zero.  The equation, updated
+    // boundary gradients, reference constraint, and Picard coupling are
+    // otherwise identical to the original implementation.
+    if (potentialCorrectionInitialGuess_ == "zero")
+    {
+        deltaPhi.primitiveFieldRef() = scalar(0);
+    }
     timings[2] = secs(tPrepare);
 
     const auto tCorrectionBC = tick();

@@ -3,7 +3,6 @@
 
 #include "fvMesh.H"
 #include "dictionary.H"
-#include "Switch.H"
 #include "autoPtr.H"
 #include "PtrList.H"
 #include "runTimeSelectionTables.H"
@@ -235,9 +234,6 @@ public:
 class potentialManager
 {
     autoPtr<potentialModel> model_;
-    // When enabled, BV-only convergence failure does not force an
-    // electrolyte-potential correction. EN failure still does.
-    Switch skipOnCurrentFailure_;
 
 public:
     potentialManager
@@ -257,20 +253,7 @@ public:
 
     void evaluateConstraint() { model_->evaluateConstraint(); }
     bool converged() const { return model_->converged(); }
-    // currentFailed is the BV/current constraint convergence result, not
-    // an independently evaluated electrolyte-current residual.
-    bool needsCorrection(const bool currentFailed) const
-    {
-        return !model_->converged() || (currentFailed && !skipOnCurrentFailure_);
-    }
-
-    void correct(const bool currentFailed = false)
-    {
-        if (needsCorrection(currentFailed))
-        {
-            model_->correct(currentFailed && !skipOnCurrentFailure_);
-        }
-    }
+    void correct(const bool force = false) { model_->correct(force); }
     void report() const { model_->report(); }
     const scalarField& chargeResidual() const { return model_->chargeResidual(); }
     const scalarField& chargeScale() const { return model_->chargeScale(); }

@@ -132,11 +132,6 @@ potentialManager::potentialManager
         (
             mesh, electroChemistry, reactions, species, c, phiE, T, Rgas, F
         )
-    ),
-    skipOnCurrentFailure_
-    (
-        mesh.solutionDict().subDict("Picard").subDict("electroneutrality")
-            .getOrDefault<Switch>("skipOnCurrentFailure", false)
     )
 {}
 

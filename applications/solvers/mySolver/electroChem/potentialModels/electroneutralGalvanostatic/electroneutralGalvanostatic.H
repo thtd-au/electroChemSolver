@@ -19,6 +19,7 @@ class electroneutralGalvanostatic : public potentialModel
     scalar absTol_;
     scalar relTol_;
     scalar relaxation_;
+    word potentialCorrectionInitialGuess_;
 
     scalarList z_;
     scalarList D_;
