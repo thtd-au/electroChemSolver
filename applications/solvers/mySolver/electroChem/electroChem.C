@@ -366,7 +366,9 @@ int main(int argc, char *argv[])
             currentMgr.report();
             potentialMgr.report();
             profileRecord(6, profileReportStart);
-            if ((!electroneutralityOK || !currentOK) && !finalState)
+            // The manager owns the decision to force a potential correction.
+            // Keep the profiling timer limited to actual correction calls.
+            if (!finalState && potentialMgr.needsCorrection(!currentOK))
             {
                 const auto profilePotentialStart = profileNow();
                 potentialMgr.correct(!currentOK);
